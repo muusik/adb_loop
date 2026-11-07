@@ -4,9 +4,8 @@ How a development loop reaches an Android phone over adb and moves files to and 
 =sh=, for the projects that build an app and test it on a phone: finding the phone, pulling what the
 app wrote, installing a build. What a project does with those files stays in that project.
 
-The scripts move here one at a time from the two projects that use it,
-[[https://github.com/muusik/android_imu][android_imu]] and bsfc_mapper. For now the repository holds
-only this README and the test harness.
+The scripts move here one at a time from the two projects that use it, android_imu and bsfc_mapper.
+For now the repository holds only this README and the test harness.
 
 * Using it
 
