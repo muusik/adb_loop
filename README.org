@@ -14,6 +14,8 @@ So far:
 - =pull.sh= :: a directory of an app's mirrored here as deltas: each transfer resumes, a dropped
   link is waited for and gone on from, and old files held here byte for byte can be pruned from the
   phone.
+- =install.sh= :: a build installed over the app: by fast deploy, checked by the package's update
+  time, the logcat cleared, the label recorded and the app started again if it was running.
 
 * Using it
 
@@ -53,6 +55,9 @@ adb_loop_address=${MY_PHONE:-}          # the address the user asked for, if any
 adb_loop_default=phone.lan:5555         # else this one, in the container
 adb_loop_last_address=                  # optional: a file with the phone's last known host
 adb_loop_on_connect=                    # optional: a function to call once it answers
+adb_loop_package=com.example.app        # the app, for install.sh
+adb_loop_label_file=                    # optional: a file on the phone that gets the build's label
+adb_loop_install_log=                   # optional: a file here that gets a line per install
 
 # loop/where.sh, executable: run, it lists the scripts in loop/ by place
 #!/usr/bin/env sh
@@ -71,6 +76,11 @@ adb shell ls /sdcard
 A pull sets =pull_remote= and =pull_dest=, redefines the =pull_*= rules that =pull.sh= lists for its
 own files, and calls =phone_reach=, =pull_ask_gzip=, =pull_all= and, unless told to keep,
 =prune_phone=.
+
+An install reaches the phone, then calls =install_apk APK LABEL=, with =am start= extras after them
+for the app's restart. It returns 3 when the phone's copy is signed by another key: whether to
+uninstall, which deletes the app's data, is the project's decision. =install_before_clear=, for a
+project to redefine, runs before the logcat is cleared.
 
 A script sources these before it changes directory, since =$0= is how it finds its checkout.
 
