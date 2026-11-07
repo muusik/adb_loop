@@ -1,0 +1,51 @@
+#+TITLE: adb_loop
+
+How a development loop reaches an Android phone over adb and moves files to and from it, in POSIX
+=sh=, for the projects that build an app and test it on a phone: finding the phone, pulling what the
+app wrote, installing a build. What a project does with those files stays in that project.
+
+The scripts move here one at a time from the two projects that use it,
+[[https://github.com/muusik/android_imu][android_imu]] and bsfc_mapper. For now the repository holds
+only this README and the test harness.
+
+* Using it
+
+A project adds it as a submodule at =external/adb_loop=, by its https address so that a clone needs
+no key:
+
+#+begin_src sh
+git submodule add https://github.com/muusik/adb_loop.git external/adb_loop
+#+end_src
+
+The project also keeps a =loop/project.sh=, which its scripts source first. It holds the project's
+settings and checks that the library is the commit the project records. The check has to be in the
+project, since the library is what may be missing or old:
+
+| Library                                            | The check                           |
+|----------------------------------------------------+-------------------------------------|
+| At the recorded commit                             | says nothing, the script goes on    |
+| Missing, or behind the record                      | updates it, and stops if that fails |
+| Ahead of the record, or with uncommitted changes   | says so, the script goes on         |
+| Anything else (diverged, behind with changes, ...) | stops and says why, with exit 2     |
+
+A plain =git pull= that moves a submodule leaves its files old, and =git status= then reads
+=modified: external/adb_loop (new commits)= as if someone had advanced it on purpose. A
+=git commit -am= at that point records the old commit again, taking the move back for everyone who
+pulls it. So on each machine that works on a project:
+
+#+begin_src sh
+git config submodule.recurse true
+git config push.recurseSubmodules check
+#+end_src
+
+* Tests
+
+python3 unittest over a stub adb, with no phone and nothing to install:
+
+#+begin_src sh
+python3 -m unittest discover -s tests
+#+end_src
+
+* License
+
+MIT; see =LICENSE=.

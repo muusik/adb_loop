@@ -1,0 +1,2 @@
+# A project's loop/project.sh reports uncommitted changes here, so a test run must leave none.
+__pycache__/
