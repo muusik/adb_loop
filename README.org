@@ -5,7 +5,12 @@ How a development loop reaches an Android phone over adb and moves files to and 
 app wrote, installing a build. What a project does with those files stays in that project.
 
 The scripts move here one at a time from the two projects that use it, android_imu and bsfc_mapper.
-For now the repository holds only this README and the test harness.
+So far:
+
+- =where.sh= :: =runs_in=, the one line that says and enforces where a script runs, and the listing
+  of a project's scripts by place.
+- =phone.sh= :: reaching the phone: the address to use, whether it really answers, waiting for a
+  link that dropped.
 
 * Using it
 
@@ -36,6 +41,42 @@ pulls it. So on each machine that works on a project:
 git config submodule.recurse true
 git config push.recurseSubmodules check
 #+end_src
+
+Its settings and the scripts' first lines:
+
+#+begin_src sh
+# loop/project.sh, above the check
+adb_loop_address=${MY_PHONE:-}          # the address the user asked for, if any
+adb_loop_default=phone.lan:5555         # else this one, in the container
+adb_loop_last_address=                  # optional: a file with the phone's last known host
+adb_loop_on_connect=                    # optional: a function to call once it answers
+
+# loop/where.sh, executable: run, it lists the scripts in loop/ by place
+#!/usr/bin/env sh
+# runs_in anywhere
+. "$(dirname "$0")/project.sh"
+. "$adb_loop_path/where.sh"
+
+# loop/pull.sh, a script that reaches the phone
+. "$(dirname "$0")/project.sh"
+. "$adb_loop_path/phone.sh"
+runs_in adb_client "$@"
+phone_reach 3
+adb shell ls /sdcard
+#+end_src
+
+A script sources these before it changes directory, since =$0= is how it finds its checkout.
+
+| =runs_in=       | In the container | Where the launcher is       | Elsewhere                   |
+|-----------------+------------------+-----------------------------+-----------------------------|
+| =container=     | runs             | runs again in the container | refuses, exit 2             |
+| =adb_client=    | runs             | runs again in the container | runs, on this machine's adb |
+| =agent_session= | runs             | refuses, exit 2             | refuses, exit 2             |
+| =laptop=        | refuses, exit 2  | refuses, exit 2             | runs                        |
+
+The launcher is bread_ladder's =bl= or =$BL_LAUNCHER=, for a project that builds in a container.
+With neither, a script declared =adb_client= only needs adb on the =PATH=. ~ADB_LOOP_LOCAL_ADB=1~
+makes a machine that has a launcher use its own adb.
 
 * Tests
 
