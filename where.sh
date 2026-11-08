@@ -32,10 +32,10 @@ has_launcher() {
   [ -z "${ADB_LOOP_LOCAL_ADB:-}" ] && "${BL_LAUNCHER:-bl}" --image-name >/dev/null 2>&1
 }
 
-# The launcher picks the checkout by the directory it starts in, and the path is the one inside the container.
+# The launcher picks the checkout by the directory it starts in and mounts it at /home/node/repos/<its name>.
 in_container_again() {
   cd "$(dirname "$0")/.." || exit 1
-  self=/home/node/workspace/loop/$(basename "$0")
+  self=/home/node/repos/$(basename "$PWD")/loop/$(basename "$0")
   echo "loop/$(basename "$0"): running it in the agent's container" >&2
   # shellcheck disable=SC2086  # bl_args is several words on purpose
   if [ -n "${bl_after:-}" ]; then

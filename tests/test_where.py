@@ -51,7 +51,7 @@ class RunsIn(unittest.TestCase):
         for kind in ("container", "adb_client"):
             r, top = self.run_it(kind, "a", "b c")
             self.assertEqual(r.returncode, 7, kind)
-            self.assertEqual(r.stdout, "bl[%s] --exec /home/node/workspace/loop/s.sh a b c\n" % top, kind)
+            self.assertEqual(r.stdout, "bl[%s] --exec /home/node/repos/%s/loop/s.sh a b c\n" % (top, top), kind)
 
     def test_without_a_launcher(self):
         self.assertEqual(self.run_it("container", launcher=False)[0].returncode, 2)
