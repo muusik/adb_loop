@@ -141,6 +141,14 @@ class Mirror(PullCase):
         self.assertEqual(self.got("Logs/a.csv"), body)
         self.assertNotIn("gzip -1", " ".join(self.transfers()))
 
+    def test_a_compressed_file_goes_plain_and_a_cut_one_goes_on(self):
+        body = self.put("Logs/a.gz")
+        self.write(self.cuts, 1)
+        self.ok(CUT_DOWN="1")
+        self.assertEqual(self.got("Logs/a.gz"), body)
+        self.assertTrue(self.transfers())
+        self.assertFalse([c for c in self.transfers() if "gzip -1" in c])
+
     def test_a_grown_file_has_only_its_tail_fetched(self):
         body = self.put("Logs/a.csv")
         self.have("Logs/a.csv", body[:100000])

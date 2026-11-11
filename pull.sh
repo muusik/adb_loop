@@ -12,7 +12,8 @@
 #
 # Every transfer resumes: the bytes go through the phone's gzip and are unpacked here as they come, and a link that drops
 # leaves an exact prefix (gunzip writes what it has decoded). adb pull would delete what it got. Without a gzip on the
-# phone the bytes go plain. When a transfer stops, the pull waits for the phone and goes on from there, up to
+# phone the bytes go plain, and so do a file's that pull_compressed names: gzip would cost the phone's CPU and save
+# nothing. When a transfer stops, the pull waits for the phone and goes on from there, up to
 # ADB_LOOP_WAIT_TRIES tries of it answering (default 15, about half a minute or more) and 3 attempts at a file. Android
 # restarts adbd when the screen is locked or unlocked, if Developer options' "Default USB configuration" is anything but
 # "No data transfer". A phone that does not come back ends the pull with exit 1; the next run goes on.
@@ -41,6 +42,8 @@ pull_append_only() { return 1; }
 pull_same_size_is_same() { pull_append_only "$1"; }
 # $2 is its size: of a kind that may go from the phone once it is old and held here. Default: nothing may
 pull_prunable_kind() { return 1; }
+# already compressed, so its bytes go plain, not through the phone's gzip. Default: .gz, .xz, .zst, .bz2, .zip
+pull_compressed() { case "$1" in *.gz|*.xz|*.zst|*.bz2|*.zip) return 0 ;; *) return 1 ;; esac; }
 # to be pulled at all. Default: everything
 pull_wanted() { return 0; }
 # the phone's command that lists what may be pruned, given the find arguments in $1 that select and print the old files.
@@ -99,7 +102,9 @@ stream() {
     tick=$!
   fi
   # time enough at 50 kB/s: a link that stalls ends the call, and the wait goes on from here
-  timeout $((60 + (to - from) / 50000)) adb exec-out "tail -c +$((from + 1)) '$pull_remote/$rel' | head -c $((to - from)) | $zip" | $unzip >> "$out" 2>/dev/null
+  z=$zip; u=$unzip
+  if pull_compressed "$rel"; then z="cat"; u="cat"; fi
+  timeout $((60 + (to - from) / 50000)) adb exec-out "tail -c +$((from + 1)) '$pull_remote/$rel' | head -c $((to - from)) | $z" | $u >> "$out" 2>/dev/null
   if [ -n "$tick" ]; then
     kill "$tick" 2>/dev/null
     wait "$tick" 2>/dev/null
