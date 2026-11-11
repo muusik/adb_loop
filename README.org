@@ -17,6 +17,9 @@ So far:
 - =install.sh= :: a build installed over the app: by fast deploy, checked by the package's update
   time, the logcat cleared, the label recorded and the app started again if it was running.
 
+A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
+and two copies off the phone before a log leaves it (=docs/annex.org=).
+
 * Using it
 
 A project adds it as a submodule at =external/adb_loop=, by its https address so that a clone needs

@@ -1,0 +1,84 @@
+#+TITLE: Logs in git-annex
+#+DATE: 2026-11-11
+
+The idea: an app's finished logs kept in git-annex rather than mirrored by =pull.sh=. The desktop
+and the laptop are full repositories, and the phone is a special remote over adb that holds no git
+data, only the app's own folder. A pull imports what the app wrote, syncs until each log has at
+least two copies off the phone, and then drops it from the phone. Proposed in chat on 2026-11-11,
+after android_imu's raw logs became =.rawlog= and the phones' copies of them were pruned by hand.
+Nothing of it is built. The reasoning is in /The idea/ below.
+
+* Current (2026-11-11, a plan)
+
+** Plan
+
+*** TODO Step 1: git-annex where the loop runs
+
+Toolset. git-annex in a bread_ladder toolset (Debian packages it), for the containers that run a
+pull, and installed on the laptop. Nothing else here can start without it.
+
+*** TODO Step 2: A trial on the IMU logs
+
+Trial, by hand. A repository of its own holding only the engine's raw logs: android_imu's =logs/=
+and bsfc_mapper's =phone/imu-logs/=. They are written once, compressed already (=.rawlog=) and not
+touched by live sync, so they suit git-annex best. The phone is git-annex's built-in =adb= special
+remote (=androiddirectory= the app's folder, ~importtree=yes~, ~exporttree=yes~), and =numcopies= is
+2. Questions to answer before anything is built on it:
+
+- Dropping from the phone: is it =drop --from phone=, or exporting the tree without the file? What
+  happens when the app has written a file since the last import? It must never remove a file it has
+  not imported.
+- Does the phone count towards =numcopies=? It should not, so a log leaves the phone only once the
+  desktop and the laptop hold it.
+- How fast is an import over Wi-Fi and over the VPN, against =pull.sh='s?
+- Is a log still being written left alone (session running, file growing)?
+- Can the desktop and the laptop sync over ssh from the laptop's side? The container has no key for
+  the laptop.
+- Where the repository lives: android_imu's =logs/= is inside its checkout, ignored, so a repository
+  of its own there would be nested.
+
+*** TODO Step 3: =annex.sh=
+
+Library. If the trial holds up: the import, the sync and the drop as a function here, with the
+project's rules as hooks, as =pull.sh= has them: which files are finished (a session closed, a log
+not modified for a while) and which are left to =pull.sh=. Tests as =tests/test_pull.py='s, with a
+fake =adb=.
+
+*** TODO Step 4: The projects take it
+
+Projects. The raw logs first, in both projects. Then bsfc_mapper's other finished files: the session
+CSVs once closed, the K-line traces, the GPS tracks. =pull.sh= keeps what changes: the sample
+stores, the profile and the map, =notes.tsv=, and a log still being written (live sync appends to
+it). The laptop's one-way rsync to the desktop goes for those files.
+
+* The idea (2026-11-11)
+
+What fits:
+
+- "At least two copies before it leaves the phone" is =numcopies=: =git annex drop= refuses a drop
+  that would leave fewer. =pull.sh='s prune checks the same with its own md5 comparisons, and a
+  prune from the container counts the desktop's copy alone (bsfc_mapper docs/loop-scripts.org
+  /Pruning from everywhere/).
+- The =adb= special remote with =importtree= lists the app's files under the app's own names.
+  Nothing on the phone needs git, and the app does not change.
+- =git annex whereis= says which machine holds each log. Today that is an md5 comparison at prune
+  time, and nothing records it.
+- =git annex sync --content= between the desktop and the laptop goes both ways. The laptop's rsync
+  to the desktop goes one way and never deletes, so a file removed on the desktop comes back from
+  the laptop's copy (seen on 2026-11-11, after the raw logs were converted).
+
+What does not fit, and stays with =pull.sh=:
+
+- Files that change. git-annex keeps every version in full, so a 100 MB sample store pulled after
+  each drive would pile up. Only files that are finished once written go into git-annex.
+- A log still being written. =pull.sh= resumes a growing file from where it stopped, and
+  bsfc_mapper's live sync appends to files in its mirror. git-annex fetches a changed file whole,
+  and a file it manages is read-only. A log goes in once its session has ended.
+- Compression on the way. The =adb= remote copies a file as it is, while =pull.sh= streams text
+  through the phone's =gzip -1=, about ten times less over a slow link. That no longer matters for a
+  =.rawlog=, but it does for bsfc_mapper's session CSVs.
+- A stricter rule. If the phone is not a copy, a log stays on it until the laptop has synced, longer
+  than now.
+
+Scripts read a file through git-annex's link into its store. Those used here follow links, so no
+reader should need to change; the trial checks that too.
