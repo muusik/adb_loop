@@ -24,6 +24,8 @@ So far:
   machine through bread_ladder's =bl-lease=; nothing where that is missing. =install.sh= holds the
   device's (=phone=, or =emulator= for an emulator) while it installs.
 
+Where a pull lands, the same rule for every project: =docs/data-dirs.org=, with its plan.
+
 A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
 and two copies off the phone before a log leaves it (=docs/annex.org=).
 
@@ -68,6 +70,8 @@ adb_loop_on_connect=                    # optional: a function to call once it a
 adb_loop_package=com.example.app        # the app, for install.sh
 adb_loop_label_file=                    # optional: a file on the phone that gets the build's label
 adb_loop_install_log=                   # optional: a file here that gets a line per install
+adb_loop_name=example_app               # the data directory's name, the repository's, for pull.sh
+adb_loop_data=${MY_DATA:-}              # optional: the data directory itself, if the user names one
 
 # loop/where.sh, executable: run, it lists the scripts in loop/ by place
 #!/usr/bin/env sh
@@ -83,9 +87,14 @@ phone_reach 3
 adb shell ls /sdcard
 #+end_src
 
-A pull sets =pull_remote= and =pull_dest=, redefines the =pull_*= rules that =pull.sh= lists for its
-own files, and calls =phone_reach=, =pull_ask_gzip=, =pull_all= and, unless told to keep,
-=prune_phone=.
+A pull sets =pull_remote=, redefines the =pull_*= rules that =pull.sh= lists for its own files, and
+calls =phone_reach=, =pull_ask_gzip=, =pull_all= and, unless told to keep, =prune_phone=. The files
+land in the project's data directory, =$XDG_DATA_HOME/<adb_loop_name>= or =$adb_loop_data=, under
+=phone/=, at the same path below the app's =files/= as on the phone (=files/imu-logs= into
+=phone/imu-logs=), unless the project sets =pull_dest= itself. The project lists that directory in
+its =.bl-mounts= (=$XDG_DATA_HOME/NAME /home/node/.local/share/NAME=), so that the container's copy
+is the host's: in the container a pull into a directory that no mount from the host holds stops with
+exit 2 before it fetches or prunes anything (docs/data-dirs.org).
 
 A part of a script that must not overlap another job's (a build into a shared cache, the phone, the
 emulator) holds a lease: =lease_take NAME= waits for it (up to 600 s, exit 75 after) and

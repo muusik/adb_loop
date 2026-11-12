@@ -43,7 +43,7 @@ case "$how" in
     esac
     exec sh -c "$cmd" ;;
 esac
-""".replace("REMOTE", REMOTE)
+"""
 APP_RULES = """
 pull_append_only() { case "$1" in Logs/*) return 0 ;; *) return 1 ;; esac; }
 pull_prunable_kind() { case "$1" in Logs/notes.tsv) return 1 ;; Logs/*) [ "$2" -ge $((min_kb * 1024)) ] ;; *) return 1 ;; esac; }
@@ -66,18 +66,22 @@ echo finished
 class PullCase(unittest.TestCase):
     rules = APP_RULES
     dirs = "."
+    remote = REMOTE
+    # the script's lines that say where the files land
+    dest = None
 
     def setUp(self):
         self.top = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.top)
-        self.stub = StubAdb(self.top, BODY)
+        self.stub = StubAdb(self.top, BODY.replace("REMOTE", self.remote))
         self.phone = os.path.join(self.top, "phone")
         self.here = os.path.join(self.top, "here")
         os.makedirs(self.phone)
         self.script = os.path.join(self.top, "s.sh")
         with open(self.script, "w") as f:
-            f.write('adb_loop_path=%s\nadb_loop_default=lan:5555\npull_remote=%s\npull_dest=%s\n'
-                    '. "$adb_loop_path/pull.sh"\n%s%s' % (ROOT, REMOTE, self.here, self.rules, MAIN % self.dirs))
+            dest = "pull_dest=%s\n" % self.here if self.dest is None else self.dest
+            f.write('adb_loop_path=%s\nadb_loop_default=lan:5555\npull_remote=%s\n%s'
+                    '. "$adb_loop_path/pull.sh"\n%s%s' % (ROOT, self.remote, dest, self.rules, MAIN % self.dirs))
         self.cuts = os.path.join(self.top, "cuts")
         self.down = os.path.join(self.top, "down")
         self.gone = os.path.join(self.top, "gone")
@@ -87,7 +91,8 @@ class PullCase(unittest.TestCase):
         self.env.pop("ANDROID_SERIAL", None)
         self.env.update(PHONE=self.phone, CUTS=self.cuts, DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
                         ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2",
-                        ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull)
+                        ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull,
+                        ADB_LOOP_ROOT_MOUNT="none", XDG_DATA_HOME=os.path.join(self.top, "xdg"))
 
     def put(self, name, data=None, size=300000, days=0):
         path = os.path.join(self.phone, name)
@@ -369,6 +374,60 @@ class Flat(PullCase):
         self.assertEqual(sorted(os.listdir(self.phone)), ["imu-new.csv", "other.txt"])
         self.assertIn("pruned 1 files", r.stdout)
         self.assertTrue(os.path.exists(os.path.join(self.here, "imu-old.csv")))
+
+
+class Dest(PullCase):
+    """Where the files land when the project does not say: its data directory's phone/, by the path below files/."""
+    remote = "/sdcard/Android/data/com.example.app/files/logs"
+    rules = FLAT_RULES.replace("imu-*", "*")
+    dest = "adb_loop_name=proj\n"
+
+    def setUp(self):
+        super().setUp()
+        self.here = os.path.join(self.top, "xdg", "proj", "phone", "logs")
+
+    def test_the_data_directorys_phone_mirror_by_the_path_below_files(self):
+        body = self.put("a.csv", size=1000)
+        r = self.ok()
+        self.assertIn("into %s" % self.here, r.stdout)
+        self.assertEqual(self.got("a.csv"), body)
+
+    def test_the_projects_own_variable_names_another_data_directory(self):
+        body = self.put("a.csv", size=1000)
+        with open(self.script) as f:
+            text = f.read()
+        with open(self.script, "w") as f:
+            f.write(text.replace("adb_loop_name=proj\n", 'adb_loop_name=proj\nadb_loop_data=${MY_DATA:-}\n'))
+        self.ok(MY_DATA=os.path.join(self.top, "mine"))
+        with open(os.path.join(self.top, "mine", "phone", "logs", "a.csv"), "rb") as f:
+            self.assertEqual(f.read(), body)
+        self.assertFalse(os.path.exists(os.path.join(self.top, "xdg")))
+
+    def test_in_the_container_a_directory_on_its_own_root_is_refused_before_anything_is_fetched(self):
+        self.put("a.csv", size=1000, days=30)
+        root = subprocess.run(["stat", "-c", "%m", self.top], capture_output=True, text=True).stdout.strip()
+        r = self.pull(ADB_LOOP_ROOT_MOUNT=root, KEEP="")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(".bl-mounts", r.stderr)
+        self.assertEqual(self.transfers(), [])
+        self.assertEqual(os.listdir(self.phone), ["a.csv"])
+
+    def test_outside_the_container_any_directory_will_do(self):
+        self.put("a.csv", size=1000)
+        root = subprocess.run(["stat", "-c", "%m", self.top], capture_output=True, text=True).stdout.strip()
+        self.ok(ADB_LOOP_ROOT_MOUNT=root, ADB_LOOP_CONTAINER_MARKERS=os.path.join(self.top, "none"))
+        self.assertTrue(os.path.exists(os.path.join(self.here, "a.csv")))
+
+
+class NoDest(PullCase):
+    remote = "/sdcard/somewhere"
+    dest = ""
+
+    def test_neither_a_dest_nor_a_name_is_refused(self):
+        self.put("a.csv", size=1000)
+        r = self.pull()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no pull_dest", r.stderr)
 
 
 if __name__ == "__main__":

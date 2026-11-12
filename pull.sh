@@ -1,7 +1,13 @@
 # shellcheck shell=sh
 # pull.sh: a directory of an app's on the phone, mirrored here as deltas. Sourced by a project's loop/pull.sh, which
-# sets pull_remote (the directory on the phone) and pull_dest (the one here), redefines the pull_* rules below for its own
-# files, then calls phone_reach, pull_ask_gzip, pull_all and, unless told to keep, prune_phone.
+# sets pull_remote (the directory on the phone) and, if it must, pull_dest (the one here), redefines the pull_* rules below
+# for its own files, then calls phone_reach, pull_ask_gzip, pull_all and, unless told to keep, prune_phone.
+#
+# Where the files land (docs/data-dirs.org): pull_dest, else the project's data directory's phone/, at the same path below
+# the app's files/ as pull_remote: .../files/imu-logs into DATA/phone/imu-logs. DATA is $adb_loop_data when the project
+# sets it (from a variable of its own), else $XDG_DATA_HOME/$adb_loop_name, the name being the repository's. In the
+# container a directory on the container's own root goes with it, and the prune would have deleted the phone's copy:
+# a pull there exits 2 and names .bl-mounts, the file that mounts the host's directory.
 #
 # adb has no rsync (adb sync is for system images, push --sync is push-only), so each file on the phone is compared with
 # the copy here. The same size: skipped, unless pull_same_size_is_same says otherwise and it is under 1 MB, when its md5
@@ -356,8 +362,34 @@ pull_monitor_stop() {
   rm -f "$pull_pf"
 }
 
+# pull_dest from the project's data directory when it is not set, made, and refused (exit 2) where it would not outlast the
+# container. Called by pull_all and prune_phone; a project may call it first, to stop before the phone is reached.
+pull_resolve_dest() {
+  if [ -z "${pull_dest:-}" ]; then
+    pull_files_at=$(printf '%s' "$pull_remote" | sed -n 's#^.*/Android/data/[^/]*/files\(/.*\)\{0,1\}/*$#\1#p')
+    pull_data=${adb_loop_data:-}
+    if [ -z "$pull_data" ] && [ -n "${adb_loop_name:-}" ]; then
+      pull_data=${XDG_DATA_HOME:-$HOME/.local/share}/$adb_loop_name
+    fi
+    if [ -z "$pull_data" ] || ! printf '%s' "$pull_remote" | grep -q '/Android/data/[^/]*/files\(/\|$\)'; then
+      echo "pull.sh: no pull_dest, and no adb_loop_name or adb_loop_data with a pull_remote under an app's files/" >&2
+      exit 2
+    fi
+    pull_dest=$pull_data/phone$pull_files_at
+  fi
+  mkdir -p "$pull_dest" || exit 1
+  # ADB_LOOP_ROOT_MOUNT: the tests' stand-in for the container's root, which a temporary directory is on
+  if in_container && [ "$(stat -c %m "$pull_dest")" = "${ADB_LOOP_ROOT_MOUNT:-/}" ]; then
+    echo "pull.sh: $pull_dest is not on a mount from the host, so it goes when the container does; list the data" \
+         "directory in the checkout's .bl-mounts (\$XDG_DATA_HOME/NAME /home/node/.local/share/NAME) and start a new session" >&2
+    exit 2
+  fi
+}
+
 # Fails when a file was not pulled or the phone went away. Shown as it goes by the monitor, and summed up at the end.
 pull_all() {
+  pull_resolve_dest
+  echo "into $pull_dest"
   pull_t0=$(date +%s)
   pull_tmp="${TMPDIR:-/tmp}/adb_loop_pull-$$"
   pull_monitor_start
@@ -433,6 +465,7 @@ held() {
 
 # pull_held_also: more of the message, where else the files are held
 prune_phone() {
+  pull_resolve_dest
   echo "looking for files on the phone older than $keep_days days"
   old=$(timeout 60 adb exec-out "cd '$pull_remote' 2>/dev/null && { $(pull_prune_find "-type f -mtime +$keep_days -exec stat -c '%s %n' {} +"); } 2>/dev/null" |
         tr -d '\r' | sed 's| \./| |')

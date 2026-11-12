@@ -1,0 +1,107 @@
+#+TITLE: Where a pull lands
+#+DATE: 2026-11-12
+
+One rule for where a project's =loop/pull.sh= puts the phone's files, the same on every machine and
+in the container: =$XDG_DATA_HOME/<repo>/phone/=, the app's =files/= directory mirrored there, and
+the project's data directory in its =.bl-mounts= so that bread_ladder's container sees the host's.
+Proposed in chat on 2026-11-12, after a look at where the four Android projects' pulls had landed.
+The reasoning is in /Four places/ below.
+
+* Current (2026-11-12, the rule in pull.sh)
+
+A project's data directory is =$XDG_DATA_HOME/<name>= (=~/.local/share/<name>=), the name being its
+repository's, set as =adb_loop_name= in =loop/project.sh=; a project's own variable may name another
+(=adb_loop_data=). =pull.sh= mirrors the app's files there under =phone/=, at the same path below
+=files/= as on the phone: android_imu pulls =files/imu-logs/=, which lands in =phone/imu-logs/=. A
+project that sets =pull_dest= itself keeps it (bsfc_mapper, whose data directory is =bsfc-logger=,
+older than the rule).
+
+In the container a directory is kept only on a mount from the host. A pull there into a directory
+whose mount is the container's own root ends before it starts, with exit 2 and a pointer to
+=.bl-mounts=: what it fetched would go with the container, and its prune would have deleted the
+phone's copy of what it held.
+
+| Project       | Phone                      | Host (desktop and laptop)                    | Mounted by       |
+|---------------+----------------------------+----------------------------------------------+------------------|
+| bsfc_mapper   | =com.tarkvaria.bsfc/files= | =~/.local/share/bsfc-logger/phone/=          | its =.bl-mounts= |
+| android_imu   | =…imu/files/imu-logs=      | =~/.local/share/android_imu/phone/imu-logs/= | its =.bl-mounts= |
+| sign_reader   | =…signs/files=             | =~/.local/share/sign_reader/phone/=          | its =.bl-mounts= |
+| squiggle_snap | =…squiggle/files= (logs)   | =~/.local/share/squiggle_snap/phone/=        | its =.bl-mounts= |
+
+A project that reads another's pulled files lists that project's line in its own =.bl-mounts=,
+written exactly as the owner writes it: bl takes a mount listed twice the same way once, and refuses
+the same directory mounted read-only by one checkout and read-write by another, so a session that
+opens both (=bl --with=) would not start. android_imu does so for bsfc_mapper's (its
+=core/tools/course_lever.py=).
+
+** Plan
+
+*** DONE Step 1: The rule in pull.sh
+
+Library. =adb_loop_name= and =adb_loop_data= in a project's settings; =pull_dest=, when the project
+leaves it empty, from them and =pull_remote='s path below the app's =files/=; =pull_all= makes the
+directory; in the container, a directory on the container's own root refused with exit 2. Tests over
+the stub adb for each, README.
+
+Done 2026-11-12 (=pull.sh= =pull_resolve_dest=, =tests/test_pull.py= =Dest=).
+
+*** TODO Step 2: android_imu
+
+Project. =.bl-mounts= with its own data directory and bsfc_mapper's line; =loop/pull.sh= on the
+default, =logs/= kept for the build's files (=build.log=, =installed.tsv=); the README's usage lines
+pointed at the new place. adb_loop's commit recorded.
+
+*** TODO Step 3: sign_reader
+
+Project. =.bl-mounts=; =loop/pull.sh= on the default, =/home/node/geodata/phone/signs= dropped;
+=SIGNS_DATA= now names the data directory, as =BSFC_DATA= does bsfc_mapper's, not the mirror.
+
+*** TODO Step 4: squiggle_snap on adb_loop
+
+Project. The submodule, =loop/project.sh=, =where.sh=, =pull.sh= (=squiggle-logs/= and =imu-logs/=,
+not the store), =build.sh= (the app built and installed through =install.sh=), and =.bl-mounts=.
+
+*** TODO Step 5: The data moved on the host
+
+The user, with no bl session running. The pulled files that are in the old places go to the new
+ones: android_imu's =logs/imu-*= from each checkout (desktop and laptop),
+=~/.local/share/bread_ladder/geodata/phone/signs= and =…/squiggle=. The commands are in a note
+outside this repository (they name one machine's paths). Until then a pull in a session started
+after Steps 2-4 finds an empty directory and fetches again what the phone still has; what the phone
+no longer has stays in the old place.
+
+*** TODO Step 6: bsfc_mapper's record moved
+
+Project, in one of its sessions. Its =external/adb_loop= moved to this rule's commit, for the
+refusal in /Step 1/; its =pull_dest= stays its own (the name =bsfc-logger= is in its docs, its CI
+runners and frozen test steps: docs/data-dirs.org there).
+
+*** TODO Step 7: Each pull once in the new place
+
+Test, on the phone. In a session started after /Step 5/: each project's =loop/pull.sh keep= says
+=into ~/.local/share/<name>/phone= and compares everything it already holds, fetching nothing new
+but what the phone wrote since.
+
+* Four places (2026-11-12)
+
+Before the rule, each project's pull landed somewhere else, on the desktop host:
+
+- bsfc_mapper :: =~/.local/share/bsfc-logger/phone=, by its =.bl-mounts=, the same path in the
+  container, on the desktop and on the laptop. The model the rule follows.
+- android_imu :: =logs/= in the checkout, gitignored, beside the build's =build.log= and
+  =installed.tsv=. Raw logs of about 220 MB an hour beside the source; a worktree has none of them,
+  and a =git clean -x= takes them.
+- sign_reader :: in the container =/home/node/geodata/phone/signs= (the host's
+  =~/.local/share/bread_ladder/geodata=, the geo toolset's mount), elsewhere
+  =~/.local/share/sign_reader/phone=. Two directories that nothing joins, depending on where the
+  pull ran, and the prune deletes from the phone what either one holds.
+- squiggle_snap :: by hand, into =/home/node/geodata/phone/squiggle=.
+
+The geo toolset's mount was used because it was the one directory in those containers that
+persisted, not because the files are geodata: a project that dropped the toolset would have lost
+them from its sessions. Its one merit, that every geo project sees it, is had as well by a reader
+listing the owner's line in its =.bl-mounts=.
+
+Dropped: renaming bsfc_mapper's =bsfc-logger= to =bsfc_mapper=. Its data directory is named in its
+docs, its CI runners' volumes and frozen =Run:= lines of its test plan; the rule leaves a project's
+own =pull_dest= alone, and the table above says the one exception.

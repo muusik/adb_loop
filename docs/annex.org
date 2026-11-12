@@ -19,10 +19,11 @@ pull, and installed on the laptop. Nothing else here can start without it.
 
 *** TODO Step 2: A trial on the IMU logs
 
-Trial, by hand. A repository of its own holding only the engine's raw logs: android_imu's =logs/=
-and bsfc_mapper's =phone/imu-logs/=. They are written once, compressed already (=.rawlog=) and not
-touched by live sync, so they suit git-annex best. The phone is git-annex's built-in =adb= special
-remote (=androiddirectory= the app's folder, ~importtree=yes~, ~exporttree=yes~), and =numcopies= is
+Trial, by hand. A repository of its own holding only the engine's raw logs: android_imu's
+=phone/imu-logs/= and bsfc_mapper's (docs/data-dirs.org). They are written once, compressed already
+(=.rawlog=) and not touched by live sync, so they suit git-annex best. The phone is git-annex's
+built-in =adb= special remote (=androiddirectory= the app's folder, ~importtree=yes~,
+~exporttree=yes~), and =numcopies= is
 2. Questions to answer before anything is built on it:
 
 - Dropping from the phone: is it =drop --from phone=, or exporting the tree without the file? What
