@@ -70,6 +70,7 @@ adb_loop_on_connect=                    # optional: a function to call once it a
 adb_loop_package=com.example.app        # the app, for install.sh
 adb_loop_label_file=                    # optional: a file on the phone that gets the build's label
 adb_loop_install_log=                   # optional: a file here that gets a line per install
+adb_loop_repo=                          # optional: the checkout whose commits the labels name, for the order check
 adb_loop_name=example_app               # the data directory's name, the repository's, for pull.sh
 adb_loop_data=${MY_DATA:-}              # optional: the data directory itself, if the user names one
 
@@ -106,6 +107,14 @@ An install reaches the phone, then calls =install_apk APK LABEL=, with =am start
 for the app's restart. It returns 3 when the phone's copy is signed by another key: whether to
 uninstall, which deletes the app's data, is the project's decision. =install_before_clear=, for a
 project to redefine, runs before the logcat is cleared.
+
+With =adb_loop_repo= and a label file it first checks the order: it returns 4, installing nothing,
+when the build on the phone has commits that this one lacks and that a branch still holds (work that
+landed while this job's worktree was behind, or another job's not yet landed), so that jobs building
+in worktrees of their own do not take each other's work off the phone. Commits on no branch any more
+(the job's own build before a rebase or an amend) are left behind freely, and a label that names no
+commit here is said and installed. Set to =yes=, =adb_loop_install_older= installs anyway, on
+purpose.
 
 A script sources these before it changes directory, since =$0= is how it finds its checkout.
 

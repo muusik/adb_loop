@@ -5,6 +5,9 @@
 #   adb_loop_package      the app's package (com.example.app)
 #   adb_loop_label_file   optional: a file on the phone that gets the label of the build installed, for what reads it there
 #   adb_loop_install_log  optional: a file here that gets a line per install: date, label, the phone, the APK
+#   adb_loop_repo         optional: the git repository the labels' commits are in (the project's checkout). With it and
+#                         a label file, an install that would take work off the phone is refused (below)
+#   adb_loop_install_older  "yes": install even so, on purpose
 #
 # A project may redefine, after sourcing this:
 #
@@ -17,9 +20,19 @@
 # the same time is a failure. Then the logcat is cleared, so that the next dump starts with this build, the label
 # recorded, and the app, which an install ends, started again if it was running, never on a phone where it was closed;
 # EXTRA goes to its am start (--es key value). Returns 0 when installed, 3 when the phone's copy is signed by another key
-# (what to do then, an uninstall that deletes the app's data, is the project's), 1 for any other failure. It holds the
+# (what to do then, an uninstall that deletes the app's data, is the project's), 4 when the phone's build has work this
+# one lacks (below), 1 for any other failure. It holds the
 # device's lease while it installs (lease.sh: phone, or emulator for an emulator), unless the script holds it already,
 # as one does that checks the phone before it installs.
+#
+# Jobs that build in worktrees of their own install beside each other, and one branched before another's work landed
+# would put a build without that work over it (bsfc_mapper, 2026-11-12: a worktree's build replaced the landed one for
+# four minutes). So with adb_loop_repo and a label file, the label on the phone is read first (under the lease), and
+# the install returns 4, nothing done, when the phone's build has commits that this one lacks and that some branch
+# still holds: work that landed, or another job's that has not yet. Commits on no branch any more are left behind
+# freely: the job's own build before bl-land rebased it, or before an amend. A label is git describe's (a tag, or
+# tag-N-hash, the hash with or without its "g", "-dirty" or not) or a bare hash; one that names no commit here (a
+# checkout that has not fetched it, "unknown") is said and the install goes on.
 
 # shellcheck disable=SC1091,SC2154  # set by loop/project.sh
 . "$adb_loop_path/phone.sh"
@@ -62,9 +75,38 @@ install_apk() {
   return $install_status
 }
 
+# The commit a label names, empty when it names none here.
+label_commit() {
+  label_commit_l=${1%-dirty}
+  case "$label_commit_l" in *-[0-9]*-*) label_commit_l=${label_commit_l##*-}; label_commit_l=${label_commit_l#g} ;; esac
+  git -C "$adb_loop_repo" rev-parse --verify --quiet "$label_commit_l^{commit}" 2>/dev/null
+}
+
+# 0 when the build labelled $1 holds what the phone's does (or there is nothing to tell by), 4 when it does not.
+install_in_order() {
+  [ -n "${adb_loop_label_file:-}" ] && [ -n "${adb_loop_repo:-}" ] || return 0
+  [ "${adb_loop_install_older:-no}" != yes ] || return 0
+  order_phone=$(timeout 20 adb shell cat "$adb_loop_label_file" </dev/null 2>/dev/null | tr -d '\r\n')
+  case "$order_phone" in ""|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  [ "$order_phone" != "$1" ] || return 0
+  order_old=$(label_commit "$order_phone") ||
+    { echo "the phone's build, $order_phone, is no commit here: installing without the order check" >&2; return 0; }
+  order_new=$(label_commit "$1") ||
+    { echo "$1 is no commit here: installing without the order check" >&2; return 0; }
+  for order_c in $(git -C "$adb_loop_repo" rev-list "$order_new..$order_old"); do
+    order_on=$(git -C "$adb_loop_repo" for-each-ref --contains "$order_c" --format='%(refname:short)' refs/heads |
+      head -n 1)
+    [ -z "$order_on" ] && continue
+    echo "the phone has $order_phone; $1 lacks $(git -C "$adb_loop_repo" log -1 --format='%h "%s"' "$order_c")," \
+      "which $order_on holds: not installed (rebase onto it, or install the older build on purpose)" >&2
+    return 4
+  done
+}
+
 install_apk_held() {
   install_file=$1; install_label=${2:-unknown}
   shift $(($# < 2 ? $# : 2))
+  install_in_order "$install_label" || return
   install_was_running=$(app_pid)
   install_before=$(app_updated)
   install_started=$(date +%s)
