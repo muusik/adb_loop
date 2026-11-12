@@ -13,7 +13,11 @@ So far:
   link that dropped.
 - =pull.sh= :: a directory of an app's mirrored here as deltas: each transfer resumes, a dropped
   link is waited for and gone on from, and old files held here byte for byte can be pruned from the
-  phone.
+  phone. While it runs it shows the whole pull's progress and time left, and the link (below).
+- =link.sh= :: the link to the phone in words: the Wi-Fi generation (Wi-Fi 4/5/6/7, as
+  802.11n/ac/ax/be), the band and channel, the access point's name, the signal, the rate the phone
+  sends at, whether the screen is off and Wi-Fi's power save with it, battery saver, a VPN on the
+  phone, and whether adb goes over the LAN, the VPN or USB; with a hint for each that slows a pull.
 - =install.sh= :: a build installed over the app: by fast deploy, checked by the package's update
   time, the logcat cleared, the label recorded and the app started again if it was running.
 
@@ -97,6 +101,25 @@ A script sources these before it changes directory, since =$0= is how it finds i
 The launcher is bread_ladder's =bl= or =$BL_LAUNCHER=, for a project that builds in a container.
 With neither, a script declared =adb_client= only needs adb on the =PATH=. ~ADB_LOOP_LOCAL_ADB=1~
 makes a machine that has a launcher use its own adb.
+
+* Watching a pull
+
+A pull says the link first, with a hint for whatever slows it (the screen off: on a Moto Z2 over the
+LAN that was ~7 MB/s down to ~1 MB/s), and again whenever it changes. On a terminal two lines under
+the steps follow it: the progress (per cent, bytes, the rate over the last 5 s, the time left from
+the last 30 s, or how long it has stalled) and the link.
+
+#+begin_example
+  33% 8.4 MB of 25.2 MB | 855 kB/s | about 27 s left | 2 of 5: imu-20261111-194802.rawlog
+  Wi-Fi 5, 5 GHz ch 116, home, signal fair (-68 dBm), 130 of 433 Mbit/s | screen off: power save | VPN tailscale | adb over LAN
+#+end_example
+
+The same goes, once a second, as ~key=value~ lines into =pull-<pid>.status= under
+=$ADB_LOOP_STATUS_DIR= (default =$XDG_RUNTIME_DIR/adb_loop=, else =/tmp/adb_loop=), for anything
+else that shows it: a Claude Code pane reads it in the container where the pull runs. The last
+state, =done= or =failed=, stays for a day. ~ADB_LOOP_LINK=0~ leaves the phone's link unasked (one
+adb call of about half a second, every 15 s); a project names its pull with =pull_label= (default:
+the package in =pull_remote=).
 
 * Tests
 

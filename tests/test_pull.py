@@ -28,6 +28,7 @@ case "$how" in
       exit 0
     fi
     [ -z "$NOGZIP" ] || case "$*" in *"command -v gzip"*) exit 0 ;; esac
+    case "$*" in *"cmd wifi status"*) cat "$PROBE"; exit 0 ;; esac
     cmd=$(printf '%s' "$*" | sed "s#REMOTE#$PHONE#g")
     case "$cmd" in
       *"tail -c"*)
@@ -85,7 +86,8 @@ class PullCase(unittest.TestCase):
         self.env = self.stub.env()
         self.env.pop("ANDROID_SERIAL", None)
         self.env.update(PHONE=self.phone, CUTS=self.cuts, DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
-                        ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2")
+                        ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2",
+                        ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull)
 
     def put(self, name, data=None, size=300000, days=0):
         path = os.path.join(self.phone, name)
@@ -264,6 +266,82 @@ class Mirror(PullCase):
         self.assertTrue(os.path.exists(os.path.join(self.phone, "Logs", "old.csv")))
         self.assertIn("kept on the phone: Logs/old.csv", r.stderr)
         self.assertIn("pruned 0 files", r.stdout)
+
+
+# what the phone's link probe answered on a Moto Z2 (2026-11-12), and the same phone on a weak 2.4 GHz access point
+WIFI5_SCREEN_OFF = """WifiInfo: SSID: "home", BSSID: e4:8d:8c:69:33:0c, MAC: 6e:c3:c2:02:1e:d3, IP: /192.168.1.196, \
+Security type: 4, Supplicant state: COMPLETED, Wi-Fi standard: 11ac, RSSI: -68, Link speed: 433Mbps, Tx Link speed: 433Mbps, \
+Max Supported Tx Link speed: 433Mbps, Rx Link speed: -1Mbps, Max Supported Rx Link speed: 433Mbps, Frequency: 5580MHz, Net ID: 3
+screen: mScreenOn=false
+saver: 0
+suspendopt: null
+vpn: tun1    inet 100.64.0.3
+vpnapp: VPN:com.tailscale.ipn
+"""
+WIFI4_WEAK = """WifiInfo: SSID: "far", BSSID: d4:ca:6d:e9:61:a1, MAC: 6e:c3:c2:02:1e:d3, IP: /192.168.1.196, \
+Security type: 2, Supplicant state: COMPLETED, Wi-Fi standard: 11n, RSSI: -81, Link speed: 43Mbps, Tx Link speed: 43Mbps, \
+Max Supported Tx Link speed: 72Mbps, Rx Link speed: -1Mbps, Max Supported Rx Link speed: 72Mbps, Frequency: 2472MHz, Net ID: 4
+screen: mScreenOn=true
+saver: 0
+suspendopt: null
+vpn:
+vpnapp:
+"""
+
+
+class Progress(PullCase):
+    def status(self):
+        directory = os.path.join(self.top, "status")
+        files = [f for f in os.listdir(directory) if f.endswith(".status")]
+        self.assertEqual(len(files), 1, os.listdir(directory))
+        self.assertFalse([f for f in os.listdir(directory) if f.endswith(".progress")])
+        with open(os.path.join(directory, files[0])) as f:
+            return dict(line.rstrip("\n").split("=", 1) for line in f)
+
+    def probe(self, text):
+        path = os.path.join(self.top, "probe")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_the_status_file_ends_done_with_the_bytes_fetched_and_the_pull_is_summed_up(self):
+        self.put("Logs/a.csv", size=300000)
+        body = self.put("Logs/b.csv", size=200000)
+        self.have("Logs/b.csv", body[:50000])
+        r = self.ok()
+        self.assertIn("about 440 kB to fetch, in 2", r.stdout)
+        self.assertIn("fetched 440 kB", r.stdout)
+        st = self.status()
+        self.assertEqual((st["state"], st["bytes_done"], st["bytes_total"]), ("done", "450000", "450000"))
+        self.assertEqual((st["files_done"], st["files"]), ("2", "2"))
+        self.assertEqual(st["label"], "here")
+
+    def test_a_failed_pull_says_so_in_the_status_file(self):
+        self.put("Logs/a.csv")
+        self.write(self.cuts, 1)
+        r = self.pull(NOGZIP="1", THEN_GONE="1")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        st = self.status()
+        self.assertEqual((st["state"], st["bytes_done"]), ("failed", "20000"))
+
+    def test_the_link_in_words_and_what_slows_it(self):
+        self.put("Logs/a.csv", size=1000)
+        r = self.ok(PROBE=self.probe(WIFI5_SCREEN_OFF))
+        self.assertIn("link: Wi-Fi 5, 5 GHz ch 116, home, signal fair (-68 dBm), 433 of 433 Mbit/s | screen off: power save"
+                      " | VPN tailscale | adb over network", r.stdout)
+        self.assertIn("the screen is off", r.stdout)
+        st = self.status()
+        self.assertEqual((st["wifi_gen"], st["band"], st["screen"], st["power_save"], st["vpn"]),
+                         ("Wi-Fi 5", "5 GHz", "off", "on", "tailscale"))
+
+    def test_a_weak_24_ghz_link_is_named_as_such(self):
+        self.put("Logs/a.csv", size=1000)
+        r = self.ok(PROBE=self.probe(WIFI4_WEAK))
+        self.assertIn("link: Wi-Fi 4, 2.4 GHz ch 13, far, signal weak (-81 dBm), 43 of 72 Mbit/s | screen on", r.stdout)
+        self.assertIn("2.4 GHz, several times slower", r.stdout)
+        self.assertIn("the signal is weak", r.stdout)
+        self.assertNotIn("the screen is off", r.stdout)
+        self.assertEqual(self.status()["vpn"], "")
 
 
 class Flat(PullCase):

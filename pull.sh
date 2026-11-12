@@ -21,11 +21,16 @@
 # prune_phone removes files not modified for KEEP_DAYS days (default 7) of the kinds pull_prunable_kind names, each only
 # once the copy here is byte for byte the phone's (size and md5).
 #
-# Each step says what it is doing as it starts. On a terminal a status line under them shows the file being compared, and
-# the bytes and rate of a transfer; piped, there are only the lines that stay.
+# Each step says what it is doing as it starts. While pull_all runs, a second process (the monitor) keeps two status lines
+# under them on a terminal: the whole pull's progress (bytes, rate, time left, the file at hand) and the link (link.sh:
+# the Wi-Fi, the band, the signal, the screen and its power save, a VPN, which way adb goes), asked every 15 s, with a
+# line that stays whenever the link changes. Piped, there are only the lines that stay. Either way it writes the same as
+# key=value lines to $ADB_LOOP_STATUS_DIR/pull-<pid>.status (default $XDG_RUNTIME_DIR/adb_loop, else /tmp/adb_loop), once
+# a second, for a viewer such as Claude Code's pane (README); the last state, done or failed, stays there for a day.
 
 # shellcheck disable=SC1091,SC2154  # set by loop/project.sh
 . "$adb_loop_path/phone.sh"
+. "$adb_loop_path/link.sh"
 
 keep_days=${KEEP_DAYS:-7}
 # shellcheck disable=SC2034  # for a project's pull_prunable_kind
@@ -33,6 +38,9 @@ min_kb=${PRUNE_MIN_KB:-100}
 pull_wait_tries=${ADB_LOOP_WAIT_TRIES:-15}
 pull_attempts=3
 zip="cat"; unzip="cat"
+pull_status_dir=${ADB_LOOP_STATUS_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/adb_loop}
+# the whole pull's progress, for the monitor: its pid while it runs, the bytes fetched, the file being written
+pull_monitor=; pull_done=0; pull_need=0; pull_out=; pull_from=0; pull_rel=; pull_n=0; pull_total=0; pull_state=
 
 # --- the rules, for a project to redefine after sourcing this; $1 is a path relative to pull_remote
 
@@ -55,16 +63,28 @@ pull_fetch_first() { return 0; }
 
 # --- what the steps say
 
-# a line that stays, and takes the place of the status line (below) if one is showing
+# a line that stays, and takes the place of the status lines (below) if they are showing; one write, so that the
+# monitor's drawing cannot land in the middle of it
 echo() {
-  if [ -t 1 ]; then printf '\r\033[K'; fi
-  command echo "$@"
+  if [ -t 1 ]; then printf '\r\033[J%s\n' "$*"; else printf '%s\n' "$*"; fi
 }
-# the line that the next one replaces, for what a terminal is waiting on; cut to fit, since a wrapped line would not go
+# what a terminal is waiting on: handed to the monitor while it runs, else the line that the next one replaces, cut to
+# fit, since a wrapped line would not go
 status() {
-  if [ -t 1 ]; then printf '\r\033[K  %s' "$(printf '%s' "$*" | cut -c1-76)"; fi
+  if [ -n "$pull_monitor" ]; then pull_progress "$*"
+  elif [ -t 1 ]; then printf '\r\033[K  %s' "$(printf '%s' "$*" | cut -c1-76)"; fi
 }
 mb() { printf '%d.%d' $(($1 / 1048576)) $((($1 % 1048576) * 10 / 1048576)); }
+# bytes, as kB or MB; a second, as kB/s or MB/s
+pull_bytes() { if [ "$1" -ge 1048576 ]; then echo "$(mb "$1") MB"; else echo "$((($1 + 1023) / 1024)) kB"; fi; }
+pull_rate() { echo "$(pull_bytes "$1")/s"; }
+# seconds, as people say them
+pull_dur() {
+  if [ "$1" -lt 60 ]; then echo "$1 s"
+  elif [ "$1" -lt 600 ]; then echo "$(($1 / 60)) min $(($1 % 60)) s"
+  elif [ "$1" -lt 3600 ]; then echo "$(($1 / 60)) min"
+  else printf '%d h %02d min\n' $(($1 / 3600)) $(($1 % 3600 / 60)); fi
+}
 
 # --- the transfer
 
@@ -80,37 +100,19 @@ pull_ask_gzip() {
   if [ -n "$(timeout 20 adb exec-out 'command -v gzip' | tr -d '\r')" ]; then zip="gzip -1"; unzip="gzip -dc"; fi
 }
 
-# while a transfer runs: its bytes so far and its rate, every second. A background job ignores Ctrl-C, so it ends by
-# itself once the script has gone
-ticker() {
-  out=$1; to=$2
-  last=$(stat -c %s "$out" 2>/dev/null || command echo 0)
-  while sleep 1 && kill -0 $$ 2>/dev/null; do
-    now=$(stat -c %s "$out" 2>/dev/null || command echo 0)
-    status "$(mb "$now") of $(mb "$to") MB, $(((now - last) / 1024)) kB/s"
-    last=$now
-  done
-}
-
 # the phone's bytes [from, to) of a file appended to a local file; fails when fewer arrived (the link dropped: what did
 # arrive is an exact prefix, kept)
 stream() {
   rel=$1; from=$2; to=$3; out=$4
-  tick=
-  if [ -t 1 ]; then
-    ticker "$out" "$to" &
-    tick=$!
-  fi
   # time enough at 50 kB/s: a link that stalls ends the call, and the wait goes on from here
   z=$zip; u=$unzip
   if pull_compressed "$rel"; then z="cat"; u="cat"; fi
+  pull_out=$out; pull_from=$(stat -c %s "$out" 2>/dev/null || printf 0); pull_state=transferring
+  pull_progress
   timeout $((60 + (to - from) / 50000)) adb exec-out "tail -c +$((from + 1)) '$pull_remote/$rel' | head -c $((to - from)) | $z" | $u >> "$out" 2>/dev/null
-  if [ -n "$tick" ]; then
-    kill "$tick" 2>/dev/null
-    wait "$tick" 2>/dev/null
-    printf '\r\033[K'
-  fi
   now=$(stat -c %s "$out")
+  pull_done=$((pull_done + now - pull_from)); pull_out=; pull_state=comparing
+  pull_progress
   if [ "$now" -ne "$to" ]; then
     echo "$rel: interrupted at $now of $to bytes" >&2
     return 1
@@ -186,9 +188,192 @@ list_files() {
   timeout 60 adb exec-out "cd '$pull_remote' 2>/dev/null && find $* -type f -exec stat -c '%s %n' {} + 2>/dev/null" | tr -d '\r' | sed 's| \./| |'
 }
 
-# Fails when a file was not pulled or the phone went away. The lists go in on fd 3: in the same shell, so that a phone
-# found again at another address stays found, and away from the standard input that adb shell reads.
+# how much there is to fetch, by the sizes here and there: pull_need bytes in pull_need_files files, pull_total wanted.
+# A same-size file counts as nothing, an append-only copy that turns out not to be the start as its tail: an estimate
+pull_plan() {
+  printf '%s\n' "$1" | while read -r s r; do
+    [ -n "$r" ] && pull_wanted "$r" && printf '%s %s\n' "$s" "$r"
+  done > "$pull_tmp.remote"
+  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  # shellcheck disable=SC2046  # three numbers
+  set -- $(awk 'FILENAME == ARGV[1] { p = $0; sub(/^[0-9]+ /, "", p); have[p] = $1 + 0; next }
+    NF >= 2 { p = $0; sub(/^[0-9]+ /, "", p); s = $1 + 0; h = (p in have) ? have[p] : 0; n++
+              if (s > h) { need += s - h; files++ } else if (s < h) { need += s; files++ } }
+    END { printf "%.0f %d %d\n", need, files, n }' "$pull_tmp.local" "$pull_tmp.remote")
+  rm -f "$pull_tmp.local" "$pull_tmp.remote"
+  pull_need=${1:-0}; pull_need_files=${2:-0}; pull_total=${3:-0}
+}
+
+# the main shell's side for the monitor: one line each, replaced whole, with $1 what it is doing when that changed
+pull_progress() {
+  [ -n "$pull_monitor" ] || return 0
+  [ $# -eq 0 ] || pull_activity=$1
+  printf '%s\n' "$pull_state" "$pull_n" "$pull_total" "$pull_done" "$pull_need" "$pull_out" "$pull_from" "$pull_rel" \
+    "$pull_activity" > "$pull_pf.tmp" && mv -f "$pull_pf.tmp" "$pull_pf"
+}
+
+pull_cols() {
+  c=$(stty size < /dev/tty 2>/dev/null | cut -d' ' -f2)
+  echo "${c:-80}"
+}
+
+# The monitor, in the background while pull_all runs: every second it reads the main shell's progress and the size of
+# the file being written, every 15 s the link; it draws the two status lines on a terminal and writes the status file.
+# It ends when told (USR1, after the main shell wrote done or failed) or when the main shell has gone (Ctrl-C).
+pull_monitor_loop() {
+  main=$1
+  trap ':' USR1
+  # the link as pull_monitor_start found it
+  m_t0=$(date +%s); m_last_t=$m_t0; m_last=0; m_rate=0; m_eta_rate=0; m_still=0; m_probe_t=$m_t0; m_key=$pull_link_key
+  m_hist=
+  m_hints=$(link_hints | paste -sd ';' - | sed 's/;/; /g')
+  m_cols=$(pull_cols)
+  p_state=listing; p_n=0; p_total=0; p_done=0; p_need=0; p_out=; p_from=0; p_rel=; p_act=
+  while :; do
+    m_now=$(date +%s)
+    { read -r p_state; read -r p_n; read -r p_total; read -r p_done; read -r p_need; read -r p_out; read -r p_from
+      read -r p_rel; read -r p_act; } < "$pull_pf" 2>/dev/null
+    kill -0 "$main" 2>/dev/null || p_state=stopped
+    m_live=${p_done:-0}
+    if [ -n "$p_out" ]; then
+      m_size=$(stat -c %s "$p_out" 2>/dev/null || printf '%s' "$p_from")
+      m_live=$((m_live + m_size - p_from))
+    fi
+    m_dt=$((m_now - m_last_t))
+    if [ "$m_dt" -ge 1 ]; then
+      if [ -n "$p_out" ] && [ "$m_live" -eq "$m_last" ]; then m_still=$((m_still + m_dt)); else m_still=0; fi
+      m_last_t=$m_now; m_last=$m_live
+      # time:bytes once a second or so, the last half minute of them. The rate shown is over the last 5 s; the time left
+      # is from the last 30 s, since a link in power save comes in bursts and stalls of ten seconds and more
+      m_hist="$m_hist $m_now:$m_live"
+      # shellcheck disable=SC2086  # the samples, split
+      set -- $m_hist
+      while [ $# -gt 31 ]; do shift; done
+      m_hist="$*"
+      m_eta_rate=$(pull_hist_rate "$m_now" "$m_live" "$1")
+      while [ $# -gt 6 ]; do shift; done
+      m_rate=$(pull_hist_rate "$m_now" "$m_live" "$1")
+    fi
+    if [ $((m_now - m_probe_t)) -ge 15 ] && [ "$p_state" != "done" ] && [ "$p_state" != "failed" ]; then
+      # one cut short by a slow link (its last line missing) leaves the link as it was
+      m_raw=$(link_probe)
+      case "$m_raw" in *"vpnapp:"*) link_read "$m_raw" ;; esac
+      m_probe_t=$(date +%s)
+      m_cols=$(pull_cols)
+      m_hints=$(link_hints | paste -sd ';' - | sed 's/;/; /g')
+      m_k=$(pull_link_key)
+      if [ "$m_k" != "$m_key" ]; then
+        echo "link now: $(link_summary)"
+        link_hints | while read -r h; do echo "  $h"; done
+        m_key=$m_k
+      fi
+    fi
+    m_total=${p_need:-0}
+    [ "$m_total" -ge "$m_live" ] || m_total=$m_live
+    m_left=$((m_total - m_live))
+    m_eta=
+    [ "$m_eta_rate" -le 0 ] || [ "$m_left" -le 0 ] || m_eta=$((m_left / m_eta_rate))
+    if [ "$m_total" -gt 0 ]; then m_pct=$((m_live * 100 / m_total)); else m_pct=100; fi
+    m_elapsed=$((m_now - m_t0))
+    case "$p_state" in
+      listing) m_l1="listing the files on the phone" ;;
+      *)
+        m_l1="$m_pct% $(pull_bytes "$m_live") of $(pull_bytes "$m_total")"
+        if [ "$m_still" -ge 5 ]; then m_l1="$m_l1 | stalled $(pull_dur "$m_still")"
+        else m_l1="$m_l1 | $(pull_rate "$m_rate")"; fi
+        [ -z "$m_eta" ] || m_l1="$m_l1 | about $(pull_dur "$m_eta") left"
+        [ -z "$p_act" ] || m_l1="$m_l1 | $p_act" ;;
+    esac
+    m_l2=$(link_summary)
+    case "$p_state" in
+      done|failed|stopped)
+        m_l1="$p_state: $(pull_bytes "$m_live") in $(pull_dur "$m_elapsed")"
+        [ "$m_elapsed" -le 0 ] || m_l1="$m_l1, $(pull_rate $((m_live / m_elapsed))) on average" ;;
+    esac
+    { printf '%s=%s\n' version 1 pid "$main" label "$pull_label" dest "$pull_dest" serial "${ANDROID_SERIAL:-}" \
+        state "$p_state" started "$m_t0" updated "$m_now" elapsed_s "$m_elapsed" \
+        files_done "$p_n" files "$p_total" file "$p_rel" activity "$p_act" \
+        bytes_done "$m_live" bytes_total "$m_total" rate "$m_rate" eta_s "$m_eta" stalled_s "$m_still" \
+        wifi "$link_wifi" wifi_gen "$link_gen" wifi_std "$link_std" ssid "$link_ssid" band "$link_band" \
+        channel "$link_channel" rssi "$link_rssi" signal "$link_signal" link_mbps "$link_tx" link_max_mbps "$link_txmax" \
+        screen "$link_screen" power_save "$link_powersave" battery_saver "$link_saver" vpn "$link_vpn_app" \
+        route "$link_route" hints "$m_hints" line1 "$m_l1" line2 "$m_l2"
+    } > "$pull_sf.tmp" && mv -f "$pull_sf.tmp" "$pull_sf"
+    case "$p_state" in
+      done|failed|stopped)
+        if [ -t 1 ]; then printf '\r\033[J'; fi
+        return 0 ;;
+    esac
+    if [ -t 1 ]; then
+      printf '\r\033[J  %s\n  %s\033[1A\r' "$(printf '%s' "$m_l1" | cut -c1-$((m_cols - 3)))" \
+        "$(printf '%s' "$m_l2" | cut -c1-$((m_cols - 3)))"
+    fi
+    sleep 1 &
+    wait $!
+  done
+}
+
+# bytes a second from the sample $3 (time:bytes) to now ($1, $2)
+pull_hist_rate() {
+  h_t=${3%%:*}; h_b=${3#*:}
+  if [ "$1" -gt "$h_t" ]; then echo $((($2 - h_b) / ($1 - h_t))); else echo 0; fi
+}
+
+# what in the link, changed, is said again (not the signal or the rate, which move all the time)
+pull_link_key() { echo "$link_wifi $link_bssid $link_band $link_powersave $link_saver $link_vpn_app $link_route"; }
+
+# the link said first, before the listing that a slow link makes long; then the monitor
+pull_monitor_start() {
+  link_read "$(link_probe)"
+  pull_link_key=$(pull_link_key)
+  echo "link: $(link_summary)"
+  link_hints | while read -r h; do echo "  $h"; done
+  mkdir -p "$pull_status_dir" 2>/dev/null || return 0
+  find "$pull_status_dir" -name 'pull-*' -mmin +1440 -exec rm -f {} + 2>/dev/null
+  pull_pf="$pull_status_dir/pull-$$.progress"; pull_sf="$pull_status_dir/pull-$$.status"
+  if [ -z "${pull_label:-}" ]; then
+    pull_label=$(printf '%s' "$pull_remote" | sed -n 's#.*/Android/data/\([^/]*\)/.*#\1#p')
+    [ -n "$pull_label" ] || pull_label=$(basename "$pull_dest")
+  fi
+  pull_done=0; pull_need=0; pull_out=; pull_n=0; pull_total=0; pull_state=listing; pull_activity=
+  pull_monitor=starting
+  pull_progress "listing the files on the phone"
+  pull_monitor_loop $$ &
+  pull_monitor=$!
+}
+
+# $1: pull_all's status
+pull_monitor_stop() {
+  [ -n "$pull_monitor" ] || return 0
+  if [ "$1" -eq 0 ]; then pull_state="done"; else pull_state="failed"; fi
+  pull_out=
+  pull_progress
+  kill -USR1 "$pull_monitor" 2>/dev/null
+  wait "$pull_monitor" 2>/dev/null
+  pull_monitor=
+  rm -f "$pull_pf"
+}
+
+# Fails when a file was not pulled or the phone went away. Shown as it goes by the monitor, and summed up at the end.
 pull_all() {
+  pull_t0=$(date +%s)
+  pull_tmp="${TMPDIR:-/tmp}/adb_loop_pull-$$"
+  pull_monitor_start
+  pull_files "$@"
+  pull_rc=$?
+  pull_monitor_stop "$pull_rc"
+  pull_t=$(($(date +%s) - pull_t0))
+  if [ "$pull_done" -gt 0 ]; then
+    if [ "$pull_t" -gt 0 ]; then
+      echo "fetched $(pull_bytes "$pull_done") in $(pull_dur "$pull_t"), $(pull_rate $((pull_done / pull_t))) on average"
+    else echo "fetched $(pull_bytes "$pull_done")"; fi
+  fi
+  return "$pull_rc"
+}
+
+# The lists go in on fd 3: in the same shell, so that a phone found again at another address stays found, and away from
+# the standard input that adb shell reads.
+pull_files() {
   echo "listing the files on the phone"
   list=$(list_files "$@")
   if [ -z "$list" ]; then
@@ -200,17 +385,22 @@ pull_all() {
     list=$(list_files "$@")
   fi
   if [ -z "$list" ]; then echo "nothing to pull under $* on the phone" >&2; return 0; fi
-  total=$(printf '%s\n' "$list" | wc -l)
-  echo "comparing $total files with this machine's copies"
+  pull_plan "$list"
+  if [ "$pull_need" -gt 0 ]; then
+    echo "comparing $pull_total files with this machine's copies; about $(pull_bytes "$pull_need") to fetch, in $pull_need_files"
+  else echo "comparing $pull_total files with this machine's copies"; fi
+  pull_state=comparing
   failed=0
-  n=0
+  pull_n=0
   while read -r pull_size pull_rel <&3; do
     [ -n "$pull_rel" ] && [ -n "$pull_size" ] || continue
-    n=$((n + 1))
     pull_wanted "$pull_rel" || continue
-    status "$n of $total: $pull_rel"
+    pull_n=$((pull_n + 1))
+    status "$pull_n of $pull_total: $pull_rel"
     attempt=1
     until fetch "$pull_rel" "$pull_size"; do
+      pull_state=waiting
+      status "waiting for the phone, at $pull_rel"
       if ! phone_wait "$pull_wait_tries"; then
         echo "the phone went away at $pull_rel; run again to go on (an interrupted append resumes)" >&2
         return 1
@@ -220,13 +410,14 @@ pull_all() {
         failed=$((failed + 1))
         break
       fi
+      pull_state=comparing
       echo "$pull_rel: the phone answers, going on (attempt $attempt)"
     done
   done 3<<EOF
 $list
 EOF
   if [ "$failed" -gt 0 ]; then echo "$failed file(s) not pulled" >&2; return 1; fi
-  echo "all $total files compared"
+  echo "all $pull_total files compared"
 }
 
 # --- the prune
