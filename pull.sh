@@ -214,7 +214,9 @@ pull_progress() {
 
 pull_cols() {
   c=$(stty size < /dev/tty 2>/dev/null | cut -d' ' -f2)
-  echo "${c:-80}"
+  # a terminal that does not say its size answers 0 (a pty no one sized): cut -c1--3 fails on every line
+  case "$c" in ''|*[!0-9]*) c=80 ;; *) [ "$c" -ge 20 ] || c=80 ;; esac
+  echo "$c"
 }
 
 # The monitor, in the background while pull_all runs: every second it reads the main shell's progress and the size of
