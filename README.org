@@ -4,8 +4,8 @@ How a development loop reaches an Android phone over adb and moves files to and 
 =sh=, for the projects that build an app and test it on a phone: finding the phone, pulling what the
 app wrote, installing a build. What a project does with those files stays in that project.
 
-The scripts move here one at a time from the two projects that use it, android_imu and bsfc_mapper.
-So far:
+The scripts move here one at a time from the projects that use it: android_imu, bsfc_mapper,
+sign_reader and squiggle_snap. So far:
 
 - =where.sh= :: =runs_in=, the one line that says and enforces where a script runs, and the listing
   of a project's scripts by place.

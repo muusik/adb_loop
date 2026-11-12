@@ -7,7 +7,7 @@ the project's data directory in its =.bl-mounts= so that bread_ladder's containe
 Proposed in chat on 2026-11-12, after a look at where the four Android projects' pulls had landed.
 The reasoning is in /Four places/ below.
 
-* Current (2026-11-12, the rule in pull.sh)
+* Current (2026-11-12, the rule in pull.sh; android_imu, sign_reader and squiggle_snap on it)
 
 A project's data directory is =$XDG_DATA_HOME/<name>= (=~/.local/share/<name>=), the name being its
 repository's, set as =adb_loop_name= in =loop/project.sh=; a project's own variable may name another
@@ -45,21 +45,31 @@ the stub adb for each, README.
 
 Done 2026-11-12 (=pull.sh= =pull_resolve_dest=, =tests/test_pull.py= =Dest=).
 
-*** TODO Step 2: android_imu
+*** DONE Step 2: android_imu
 
 Project. =.bl-mounts= with its own data directory and bsfc_mapper's line; =loop/pull.sh= on the
 default, =logs/= kept for the build's files (=build.log=, =installed.tsv=); the README's usage lines
 pointed at the new place. adb_loop's commit recorded.
 
-*** TODO Step 3: sign_reader
+Done 2026-11-12 (android_imu 8471415, a96c29d; adb_loop d2550cc recorded). A pull in a session
+without the mount stops with exit 2, as it should.
+
+*** DONE Step 3: sign_reader
 
 Project. =.bl-mounts=; =loop/pull.sh= on the default, =/home/node/geodata/phone/signs= dropped;
 =SIGNS_DATA= now names the data directory, as =BSFC_DATA= does bsfc_mapper's, not the mirror.
 
-*** TODO Step 4: squiggle_snap on adb_loop
+Done 2026-11-12 (sign_reader 5ea4e88, not pushed: no remote). Refuses the same way until a new
+session.
+
+*** DONE Step 4: squiggle_snap on adb_loop
 
 Project. The submodule, =loop/project.sh=, =where.sh=, =pull.sh= (=squiggle-logs/= and =imu-logs/=,
 not the store), =build.sh= (the app built and installed through =install.sh=), and =.bl-mounts=.
+
+Done 2026-11-12 (squiggle_snap 086c4db, not pushed: no remote). On the emulator:
+=loop/build.sh install= over the installed app, and =loop/pull.sh keep= 18 logs (30 MB), not the
+store.
 
 *** TODO Step 5: The data moved on the host
 
