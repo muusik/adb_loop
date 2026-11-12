@@ -7,14 +7,15 @@ the project's data directory in its =.bl-mounts= so that bread_ladder's containe
 Proposed in chat on 2026-11-12, after a look at where the four Android projects' pulls had landed.
 The reasoning is in /Four places/ below.
 
-* Current (2026-11-12, the rule in pull.sh; android_imu, sign_reader and squiggle_snap on it)
+* Current (2026-11-12, the rule in pull.sh; all four projects on it)
 
 A project's data directory is =$XDG_DATA_HOME/<name>= (=~/.local/share/<name>=), the name being its
 repository's, set as =adb_loop_name= in =loop/project.sh=; a project's own variable may name another
 (=adb_loop_data=). =pull.sh= mirrors the app's files there under =phone/=, at the same path below
 =files/= as on the phone: android_imu pulls =files/imu-logs/=, which lands in =phone/imu-logs/=. A
-project that sets =pull_dest= itself keeps it (bsfc_mapper, whose data directory is =bsfc-logger=,
-older than the rule).
+project that sets =pull_dest= itself keeps it: bsfc_mapper does, its mirror being one of several
+directories in its data directory, which is the rule's =bsfc_mapper= (it was =bsfc-logger= until
+/Step 8/).
 
 In the container a directory is kept only on a mount from the host. A pull there into a directory
 whose mount is the container's own root ends before it starts, with exit 2 and a pointer to
@@ -23,7 +24,7 @@ phone's copy of what it held.
 
 | Project       | Phone                      | Host (desktop and laptop)                    | Mounted by       |
 |---------------+----------------------------+----------------------------------------------+------------------|
-| bsfc_mapper   | =com.tarkvaria.bsfc/files= | =~/.local/share/bsfc-logger/phone/=          | its =.bl-mounts= |
+| bsfc_mapper   | =com.tarkvaria.bsfc/files= | =~/.local/share/bsfc_mapper/phone/=          | its =.bl-mounts= |
 | android_imu   | =…imu/files/imu-logs=      | =~/.local/share/android_imu/phone/imu-logs/= | its =.bl-mounts= |
 | sign_reader   | =…signs/files=             | =~/.local/share/sign_reader/phone/=          | its =.bl-mounts= |
 | squiggle_snap | =…squiggle/files= (logs)   | =~/.local/share/squiggle_snap/phone/=        | its =.bl-mounts= |
@@ -71,7 +72,7 @@ Done 2026-11-12 (squiggle_snap 086c4db, not pushed: no remote). On the emulator:
 =loop/build.sh install= over the installed app, and =loop/pull.sh keep= 18 logs (30 MB), not the
 store.
 
-*** TODO Step 5: The data moved on the host
+*** DONE Step 5: The data moved on the host
 
 The user, with no bl session running. The pulled files that are in the old places go to the new
 ones: android_imu's =logs/imu-*= from each checkout (desktop and laptop),
@@ -80,17 +81,32 @@ outside this repository (they name one machine's paths). Until then a pull in a 
 after Steps 2-4 finds an empty directory and fetches again what the phone still has; what the phone
 no longer has stays in the old place.
 
-*** TODO Step 6: bsfc_mapper's record moved
+Done 2026-11-12 (the user, from the note =host-moves-2026-11-12.md=).
+
+*** DONE Step 6: bsfc_mapper's record moved
 
 Project, in one of its sessions. Its =external/adb_loop= moved to this rule's commit, for the
 refusal in /Step 1/; its =pull_dest= stays its own (the name =bsfc-logger= is in its docs, its CI
 runners and frozen test steps: docs/data-dirs.org there).
 
+Done 2026-11-12 (bsfc_mapper 28e8cb9, adb_loop 7b5d40f recorded; its =test_pull= container case told
+that its temporary directory is not the container's root). The name was changed after all: /Step 8/.
+
 *** TODO Step 7: Each pull once in the new place
 
 Test, on the phone. In a session started after /Step 5/: each project's =loop/pull.sh keep= says
 =into ~/.local/share/<name>/phone= and compares everything it already holds, fetching nothing new
-but what the phone wrote since.
+but what the phone wrote since. bsfc_mapper's after /Step 8/.
+
+*** TODO Step 8: bsfc_mapper's directories renamed
+
+Project and user. The user asked on 2026-11-12 for =bsfc-logger= to become =bsfc_mapper=, as the
+rule would name it, reversing what /Four places/ dropped. In bsfc_mapper: =loop/dirs.sh=,
+=data_dirs.py=, =.bl-mounts=, =.gitlab-ci.yml=, the usage lines and current docs (its
+docs/data-dirs.org /The name/; the GPX namespace =urn:bsfc-logger:gpx:1= stays). In android_imu its
+=.bl-mounts= line and =course_lever.py=. On the host, with nothing running, on the desktop and the
+laptop: both directories renamed, and the =bsfc-data= runner's volumes; then bsfc_mapper's commit
+pushed.
 
 * Four places (2026-11-12)
 
@@ -115,3 +131,5 @@ listing the owner's line in its =.bl-mounts=.
 Dropped: renaming bsfc_mapper's =bsfc-logger= to =bsfc_mapper=. Its data directory is named in its
 docs, its CI runners' volumes and frozen =Run:= lines of its test plan; the rule leaves a project's
 own =pull_dest= alone, and the table above says the one exception.
+
+(Later, 2026-11-12: renamed after all, on the user's word; see /Step 8/.)
