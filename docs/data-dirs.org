@@ -92,13 +92,17 @@ runners and frozen test steps: docs/data-dirs.org there).
 Done 2026-11-12 (bsfc_mapper 28e8cb9, adb_loop 7b5d40f recorded; its =test_pull= container case told
 that its temporary directory is not the container's root). The name was changed after all: /Step 8/.
 
-*** TODO Step 7: Each pull once in the new place
+*** DONE Step 7: Each pull once in the new place
 
 Test, on the phone. In a session started after /Step 5/: each project's =loop/pull.sh keep= says
 =into ~/.local/share/<name>/phone= and compares everything it already holds, fetching nothing new
 but what the phone wrote since. bsfc_mapper's after /Step 8/.
 
-*** TODO Step 8: bsfc_mapper's directories renamed
+Done 2026-11-12, after /Step 8/, each with =keep=: android_imu 1 file compared, sign_reader 1162,
+squiggle_snap 14, bsfc_mapper 896, each into its new directory, fetching only what the phone had not
+given before. The runs printed =cannot open /dev/tty= without a terminal; fixed in 4925187.
+
+*** DONE Step 8: bsfc_mapper's directories renamed
 
 Project and user. The user asked on 2026-11-12 for =bsfc-logger= to become =bsfc_mapper=, as the
 rule would name it, reversing what /Four places/ dropped. In bsfc_mapper: =loop/dirs.sh=,
@@ -107,6 +111,9 @@ docs/data-dirs.org /The name/; the GPX namespace =urn:bsfc-logger:gpx:1= stays).
 =.bl-mounts= line and =course_lever.py=. On the host, with nothing running, on the desktop and the
 laptop: both directories renamed, and the =bsfc-data= runner's volumes; then bsfc_mapper's commit
 pushed.
+
+Done 2026-11-12 (bsfc_mapper 419c843, android_imu d480fd7; the runners' entries rewritten by
+=bl --runner-config --update=, after which pipeline 109 passed).
 
 * Four places (2026-11-12)
 
