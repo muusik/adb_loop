@@ -20,6 +20,9 @@ So far:
   phone, and whether adb goes over the LAN, the VPN or USB; with a hint for each that slows a pull.
 - =install.sh= :: a build installed over the app: by fast deploy, checked by the package's update
   time, the logcat cleared, the label recorded and the app started again if it was running.
+- =lease.sh= :: a named lease held by part of a script, shared by every session and job on the
+  machine through bread_ladder's =bl-lease=; nothing where that is missing. =install.sh= holds the
+  device's (=phone=, or =emulator= for an emulator) while it installs.
 
 A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
 and two copies off the phone before a log leaves it (=docs/annex.org=).
@@ -83,6 +86,12 @@ adb shell ls /sdcard
 A pull sets =pull_remote= and =pull_dest=, redefines the =pull_*= rules that =pull.sh= lists for its
 own files, and calls =phone_reach=, =pull_ask_gzip=, =pull_all= and, unless told to keep,
 =prune_phone=.
+
+A part of a script that must not overlap another job's (a build into a shared cache, the phone, the
+emulator) holds a lease: =lease_take NAME= waits for it (up to 600 s, exit 75 after) and
+=lease_drop NAME= lets it go; the script's end lets go of the rest. A lease a script holds is not
+taken again by the scripts it starts (=BL_LEASES_HELD=), so a build script that holds =phone= while
+it checks the phone and installs calls =install_apk= under it.
 
 An install reaches the phone, then calls =install_apk APK LABEL=, with =am start= extras after them
 for the app's restart. It returns 3 when the phone's copy is signed by another key: whether to

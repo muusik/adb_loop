@@ -17,10 +17,13 @@
 # the same time is a failure. Then the logcat is cleared, so that the next dump starts with this build, the label
 # recorded, and the app, which an install ends, started again if it was running, never on a phone where it was closed;
 # EXTRA goes to its am start (--es key value). Returns 0 when installed, 3 when the phone's copy is signed by another key
-# (what to do then, an uninstall that deletes the app's data, is the project's), 1 for any other failure.
+# (what to do then, an uninstall that deletes the app's data, is the project's), 1 for any other failure. It holds the
+# device's lease while it installs (lease.sh: phone, or emulator for an emulator), unless the script holds it already,
+# as one does that checks the phone before it installs.
 
 # shellcheck disable=SC1091,SC2154  # set by loop/project.sh
 . "$adb_loop_path/phone.sh"
+. "$adb_loop_path/lease.sh"
 
 install_before_clear() { return 0; }
 
@@ -47,6 +50,19 @@ app_start() {
 }
 
 install_apk() {
+  install_lease=$(lease_device)
+  if lease_held "$install_lease"; then
+    install_apk_held "$@"
+    return
+  fi
+  lease_take "$install_lease" || { echo "the $install_lease lease stayed busy: not installed" >&2; return 1; }
+  install_apk_held "$@"
+  install_status=$?
+  lease_drop "$install_lease"
+  return $install_status
+}
+
+install_apk_held() {
   install_file=$1; install_label=${2:-unknown}
   shift $(($# < 2 ? $# : 2))
   install_was_running=$(app_pid)

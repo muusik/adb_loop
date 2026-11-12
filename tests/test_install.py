@@ -21,6 +21,7 @@ case "$1" in
     [ -z "$INCOMPATIBLE" ] || { echo "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]"; exit 1; }
     [ -z "$FAIL" ] || { echo "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]"; exit 1; }
     rm -f "$STATE/running"
+    echo "${BL_LEASES_HELD:-}" > "$STATE/leases"
     [ -n "$STALE" ] || echo "2026-11-07 12:00:01" > "$STATE/updated"
     echo "${DROP:-0}" > "$STATE/drop"
     echo Success ;;
@@ -75,7 +76,8 @@ class Install(unittest.TestCase):
         env.pop("ANDROID_SERIAL", None)
         if serial:
             env["ANDROID_SERIAL"] = serial
-        env.update(STATE=self.state, PACKAGE=PACKAGE, **env_extra)
+        # the leases in a directory of the test's own, never the machine's
+        env.update(STATE=self.state, PACKAGE=PACKAGE, BL_LEASE_DIR=os.path.join(self.top, "leases"), **env_extra)
         return subprocess.run(["sh", script], env=env, capture_output=True, text=True, timeout=60)
 
     def test_installed_recorded_and_the_logcat_kept_then_cleared(self):
@@ -89,6 +91,26 @@ class Install(unittest.TestCase):
             fields = f.read().rstrip("\n").split("\t")
         self.assertEqual(fields[1:], ["v1.2-3-abc", "lan:5555", "app.apk"])
         self.assertIn("installed v1.2-3-abc on lan:5555", r.stdout)
+
+    @unittest.skipUnless(shutil.which("bl-lease"), "no bl-lease here (bread_ladder's)")
+    def test_the_install_holds_the_devices_lease(self):
+        r = self.run_it("install_apk app.apk v1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read("leases"), "phone\n")
+        self.write("updated", "2026-11-01 08:00:00\n")
+        r = self.run_it("install_apk app.apk v2", serial="emulator-5554")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read("leases"), "emulator\n")
+        # let go of after the install
+        env = dict(os.environ, BL_LEASE_DIR=os.path.join(self.top, "leases"))
+        free = subprocess.run(["bl-lease", "run", "phone", "-w", "0", "--", "true"], env=env, capture_output=True)
+        self.assertEqual(free.returncode, 0, free.stderr)
+
+    @unittest.skipUnless(shutil.which("bl-lease"), "no bl-lease here (bread_ladder's)")
+    def test_a_lease_the_script_holds_is_not_taken_again(self):
+        r = self.run_it('. "$adb_loop_path/lease.sh"; lease_take phone 5 && install_apk app.apk v1 && lease_held phone')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read("leases"), "phone\n")
 
     def test_a_running_app_is_started_again_with_its_extras(self):
         self.write("running", "4242\n")
