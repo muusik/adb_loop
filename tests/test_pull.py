@@ -119,8 +119,9 @@ class PullCase(unittest.TestCase):
             f.write(str(n))
 
     def pull(self, **env):
+        # a session of its own: no controlling terminal, as under a background job or a CI runner
         return subprocess.run(["sh", self.script], env=dict(self.env, **env), capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=60)
+                              stdin=subprocess.DEVNULL, timeout=60, start_new_session=True)
 
     def ok(self, **env):
         r = self.pull(**env)
@@ -141,6 +142,10 @@ class Mirror(PullCase):
         r = self.ok()
         self.assertEqual(len(self.transfers()), before)
         self.assertIn("all 2 files compared", r.stdout)
+
+    def test_no_terminal_is_no_complaint(self):
+        self.put("Logs/a.csv", b"x" * 100)
+        self.assertNotIn("/dev/tty", self.ok().stderr)
 
     def test_plain_bytes_without_a_gzip_on_the_phone(self):
         body = self.put("Logs/a.csv")
