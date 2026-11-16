@@ -1,0 +1,3 @@
+#!/bin/sh
+# The lines this commit adds to .org files stay within the fill column (README /Org line width/).
+exec ./org_width.sh

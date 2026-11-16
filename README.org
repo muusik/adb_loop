@@ -23,6 +23,8 @@ sign_reader and squiggle_snap. So far:
 - =lease.sh= :: a named lease held by part of a script, shared by every session and job on the
   machine through bread_ladder's =bl-lease=; nothing where that is missing. =install.sh= holds the
   device's (=phone=, or =emulator= for an emulator) while it installs.
+- =org_width.sh= :: a project's Org prose kept within its fill column (100): run by the project's
+  pre-commit hook on the lines a commit adds, or over every =.org= file with =--all=.
 
 Where a pull lands, the same rule for every project: =docs/data-dirs.org=, with its plan.
 
@@ -147,6 +149,29 @@ else that shows it: a Claude Code pane reads it in the container where the pull 
 state, =done= or =failed=, stays for a day. ~ADB_LOOP_LINK=0~ leaves the phone's link unasked (one
 adb call of about half a second, every 15 s); a project names its pull with =pull_label= (default:
 the package in =pull_remote=).
+
+* Org line width
+
+Prose in a project's =.org= files wraps at the =fill-column= of its =.dir-locals.el= (100), so
+=M-q= in Emacs and the org skill's =org_reflow.py= agree with what is committed. =org_width.sh=
+checks it: the lines the staged commit adds by default, every line of every tracked =.org= file
+with =--all=. Table rows, =#+begin_X= blocks, =#+= keyword lines and a line long only for a link or
+URL are not counted; headings are. Each project calls it from a tracked hook,
+=.githooks/pre-commit=:
+
+#+begin_src sh
+#!/bin/sh
+[ -x external/adb_loop/org_width.sh ] || { echo "pre-commit: external/adb_loop is not checked out" >&2; exit 0; }
+exec external/adb_loop/org_width.sh
+#+end_src
+
+Git runs it once the checkout points at the directory, once per clone (worktrees share it):
+
+#+begin_src sh
+git config core.hooksPath .githooks
+#+end_src
+
+=git commit --no-verify= skips it, for a commit that has to land as it is.
 
 * Tests
 
