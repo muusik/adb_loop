@@ -7,9 +7,9 @@ most of the time a pull takes. =stream.sh= sends a whole plan of files in one ca
 (already compressed files plain, the rest through the phone's gzip), with a third call at the same
 time carrying the phone's hashes, while keeping what =pull.sh='s transfers promise: whatever a
 dropped link leaves is an exact prefix, and the next run goes on from it. Proposed and prototyped in
-chat on 2026-11-18. Since /Step 3/ =pull.sh= sources =stream.sh= and =pull_all= runs in passes; the
-projects take it up with their submodule's commit in /Step 6/, bsfc_mapper not before /Step 5/ (its
-=pull_fetch_first=).
+chat on 2026-11-18. Since /Step 3/ =pull.sh= sources =stream.sh= and =pull_all= runs in passes,
+since /Step 5/ with no per-file way left; the projects take it up with their submodule's commit in
+/Step 6/, bsfc_mapper with its =pull_fetch_first= rewritten as a =pull_seed=.
 
 * Current (2026-11-18, pull_all in passes)
 
@@ -73,6 +73,19 @@ demuxer as each file starts; the hash call's own lines) has kept its name and si
 =ADB_LOOP_STALL= seconds (60), its adb is ended and the pass ends with what came, a line
 =stalled CALL SECONDS= among its lines. Each call's adb therefore runs in the background into a
 FIFO, so that its pid is known. The phone's side of an ended call runs until its next write fails.
+
+Before the first pass a project's =pull_seed= is offered each phone file with neither a copy nor a
+=.part= here, and may put a file at its target that is the start of the phone's: bsfc_mapper's
+store, renamed on the phone by a format change (=samples_ecu.bin= to =samples_ecu.bin.v7=), is the
+copy here under its old name, and only the rest comes. The pass hashes the whole after, as any
+append, so a seed that was not the start is cut back and kept as =.stale= (or dropped, a =.part=); a
+project checks first, with =phone_md5=, what it cannot lose. Only before the first: a later pass
+would find the files the first fetched, the old name's new store among them, and offer those.
+
+While the calls run, the monitor reads the pass's lines (the bytes of each file =done=) and the two
+buckets' files at hand, which the demuxer names in =at/plain= and =at/gzip= with the size the target
+had and the bytes to come, emptied once a file is done so that its bytes are not counted twice; the
+status line names the one with the most still to come, with the files done of all.
 
 ** Measured (2026-11-18, sign_reader's files, Z2 Force on 5 GHz Wi-Fi)
 
@@ -149,7 +162,7 @@ watchdog's =kill= taken out, the first of them fails. On the phone: sign_reader'
 fetched fresh in one pass (4 s, the phone's =md5sum= for each), and a call of =sleep 40= on the
 phone ended here after 4 s with =ADB_LOOP_STALL= 3.
 
-** TODO Step 5: Progress and pull_fetch_first
+** DONE Step 5: Progress and pull_fetch_first
 
 Library. The demuxer reports the file at hand and the bytes done to =pull_progress= (=pull_out=,
 =pull_from=, =pull_done=), from two streams at once: the status line shows both files or the larger.
@@ -157,6 +170,24 @@ Files that a project's =pull_fetch_first= claims go the per-file way after the s
 which projects define it is to be looked at first: not sign_reader; the hook came over with
 bsfc_mapper's pull (2616cad), so that one probably does, and android_imu and squiggle_snap were not
 here to look at on 2026-11-18.
+
+Done 2026-11-18 (350b9ea). Not as planned: no file goes the per-file way any more. bsfc_mapper's
+=pull_fetch_first= (the only one; android_imu and squiggle_snap still to be looked at in /Step 6/)
+did two things for its stores left by a format change, =samples_*.bin.v*=: a copy here shorter than
+the phone's had its tail appended once its start was the phone's, which is the append-only rule
+(=pull_append_only= did not name them); and a store with no copy here was looked for under its old
+name, =samples_ecu.bin= or a =.stale= of it, and renamed in place when its bytes were the start,
+saving its 170 to 570 MB. The second is the hook =pull_seed= before the first pass (/Passes/), so
+=fetch=, =whole=, =stream= and =pull_fetch_first= are gone from =pull.sh=; =phone_md5= stays, for
+=prune_phone='s =held= and for the hook. The demuxer names its file in =at/plain= and =at/gzip=
+under =pull_tmp=, which the monitor reads, instead of =pull_out= and =pull_from=; the status line
+shows the larger of the two files. New tests in =tests/test_pull.py=: the status file counting a
+slow pass's bytes as they come and naming its file (it fails with the demuxer's sizes taken out of
+=at=), and /Seed/: a renamed store moved into place with only its tail fetched, a copy that is not
+it left alone (fetched over as before, kept as =.stale=), a seed that was not the start kept as
+=.stale= and the file fetched whole. On the phone: sign_reader's pass of 2026-11-18 14:08, 37 files,
+102.9 MB in one pass (2 min 2 s, 864 kB/s on 2.4 GHz at -81 dBm), the status file's bytes, rate,
+time left and file moving every 2 s through it, every JPEG the phone's =md5sum=.
 
 ** TODO Step 6: On the phone, in the projects
 
