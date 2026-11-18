@@ -14,7 +14,8 @@ REMOTE = "/sdcard/app/files"
 # CUTS names a file holding how many transfers to cut, each at 20000 bytes, after each of which CUT_DOWN shells fail, or
 # with THEN_GONE every call does, through the file GONE. HASH_FAILS names a file holding how many hash calls fail.
 # SHRINK: a file cut to SHRINK_TO bytes as the first transfer starts. STREAM_FAIL: every transfer fails at once. STALL:
-# the first transfer sends 20000 bytes, then nothing until it is ended. A shell
+# the first transfer sends 20000 bytes, then nothing until it is ended. SLOW: transfers come 20000 bytes every 0.2 s.
+# A shell
 # eats its standard input, as the real one does.
 BODY = r"""
 [ "$1" = -s ] && shift 2
@@ -41,6 +42,11 @@ case "$how" in
         if [ -n "$SHRINK" ] && [ ! -e "$CUTS.shrunk" ]; then : > "$CUTS.shrunk"; truncate -s "$SHRINK_TO" "$PHONE/$SHRINK"; fi
         [ -z "$STREAM_FAIL" ] || exit 1
         if [ -n "$STALL" ] && [ ! -e "$CUTS.stalled" ]; then : > "$CUTS.stalled"; sh -c "$cmd" | head -c 20000; exec sleep 300; fi
+        if [ -n "$SLOW" ]; then
+          sh -c "$cmd" > "$CUTS.slow"; n=$(stat -c %s "$CUTS.slow"); i=0
+          while [ "$i" -lt "$n" ]; do tail -c +$((i + 1)) "$CUTS.slow" | head -c 20000; i=$((i + 20000)); sleep 0.2; done
+          exit 0
+        fi
         cuts=$(cat "$CUTS" 2>/dev/null || echo 0)
         if [ "$cuts" -gt 0 ]; then
           echo $((cuts - 1)) > "$CUTS"
@@ -100,7 +106,7 @@ class PullCase(unittest.TestCase):
         self.env.pop("ANDROID_SERIAL", None)
         self.hash_fails = os.path.join(self.top, "hash_fails")
         self.env.update(PHONE=self.phone, CUTS=self.cuts, HASH_FAILS=self.hash_fails, SHRINK="", SHRINK_TO="0",
-                        STREAM_FAIL="", STALL="", DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
+                        STREAM_FAIL="", STALL="", SLOW="", DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
                         ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2",
                         ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull,
                         ADB_LOOP_ROOT_MOUNT="none", XDG_DATA_HOME=os.path.join(self.top, "xdg"))
@@ -423,6 +429,31 @@ class Progress(PullCase):
         self.assertEqual((st["files_done"], st["files"]), ("2", "2"))
         self.assertEqual(st["label"], "here")
 
+    def test_while_a_pass_runs_the_status_file_counts_its_bytes_and_names_the_file_at_hand(self):
+        self.put("Logs/a.csv", size=300000)
+        seen = []
+        p = subprocess.Popen(["sh", self.script], env=dict(self.env, SLOW="1", NOGZIP="1"), stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, start_new_session=True)
+        directory = os.path.join(self.top, "status")
+        while p.poll() is None:
+            for name in os.listdir(directory) if os.path.isdir(directory) else []:
+                if name.endswith(".status"):
+                    try:
+                        with open(os.path.join(directory, name)) as f:
+                            st = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+                    except FileNotFoundError:
+                        continue
+                    if st.get("state") == "transferring":
+                        seen.append((int(st["bytes_done"]), st["file"], st["bytes_total"]))
+            time.sleep(0.1)
+        out, err = p.communicate()
+        self.assertEqual(p.returncode, 0, out + err)
+        between = [s for s in seen if 0 < s[0] < 300000]
+        self.assertTrue(between, seen)
+        self.assertEqual({(s[1], s[2]) for s in between}, {("Logs/a.csv", "300000")})
+        self.assertEqual([s[0] for s in between], sorted(s[0] for s in between))
+        self.assertEqual(self.status()["bytes_done"], "300000")
+
     def test_a_failed_pull_says_so_in_the_status_file(self):
         self.put("Logs/a.csv")
         self.write(self.cuts, 1)
@@ -449,6 +480,59 @@ class Progress(PullCase):
         self.assertIn("the signal is weak", r.stdout)
         self.assertNotIn("the screen is off", r.stdout)
         self.assertEqual(self.status()["vpn"], "")
+
+
+class Seed(PullCase):
+    """A store renamed on the phone (store.bin to store.bin.v1, a new store.bin begun) is the copy here under its old
+    name: a project's pull_seed puts it in place, and only the rest comes."""
+    rules = APP_RULES.replace("Logs/*) return 0", "Logs/*|store.bin.v*) return 0") + """
+pull_seed() {
+  case "$1" in
+    store.bin.v*)
+      old=$pull_dest/${1%.v*}
+      [ -f "$old" ] || return 0
+      n=$(stat -c %s "$old")
+      [ -n "$TRUST" ] || [ "$(local_md5 "$old")" = "$(phone_md5 "$1" "$n")" ] || return 0
+      echo "$1: the store as it was, renamed from ${old##*/}"
+      mv "$old" "$pull_dest/$1" ;;
+  esac
+}
+"""
+
+    def test_a_renamed_store_is_moved_into_place_and_only_its_tail_fetched(self):
+        old = os.urandom(200000)
+        self.put("store.bin.v1", old + os.urandom(1000))
+        new = self.put("store.bin", size=3000)
+        self.have("store.bin", old)
+        r = self.ok()
+        self.assertIn("store.bin.v1: the store as it was, renamed from store.bin", r.stdout)
+        with open(os.path.join(self.phone, "store.bin.v1"), "rb") as f:
+            self.assertEqual(self.got("store.bin.v1"), f.read())
+        self.assertEqual(self.got("store.bin"), new)
+        self.assertIn("'200000 1000 store.bin.v1'", "".join(self.transfers()))
+        self.assertEqual(sorted(os.listdir(self.here)), ["store.bin", "store.bin.v1"])
+        self.assertIn("about 4 kB to fetch", r.stdout)
+
+    def test_a_copy_that_is_not_the_renamed_store_stays(self):
+        self.put("store.bin.v1", size=201000)
+        new = self.put("store.bin", size=3000)
+        old = os.urandom(200000)
+        self.have("store.bin", old)
+        r = self.ok()
+        self.assertNotIn("renamed from", r.stdout)
+        self.assertEqual(self.got("store.bin"), new)
+        self.assertEqual(self.got("store.bin.stale"), old)
+
+    def test_a_seed_that_was_not_the_start_is_kept_as_stale_and_the_file_fetched_whole(self):
+        body = self.put("store.bin.v1", size=201000)
+        self.put("store.bin", size=3000)
+        old = os.urandom(200000)
+        self.have("store.bin", old)
+        r = self.ok(TRUST="1")
+        self.assertIn("renamed from store.bin", r.stdout)
+        self.assertEqual(self.got("store.bin.v1"), body)
+        self.assertEqual(self.got("store.bin.v1.stale"), old)
+        self.assertIn("pass 2", r.stdout)
 
 
 class Flat(PullCase):

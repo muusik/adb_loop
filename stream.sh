@@ -35,8 +35,11 @@
 stream_end="-- end"
 stream_plan_bytes=${STREAM_PLAN_BYTES:-100000}
 stream_stall=${ADB_LOOP_STALL:-60}
-# the file that names what a bucket's demuxer is writing, for the watchdog (set by stream_bucket)
+# the file in which a bucket's demuxer names what it is writing, for the watchdog and pull.sh's monitor: the path, then
+# "have len", the size it had and the bytes to come; empty between files (set by stream_bucket)
 stream_at=
+# where the buckets' files go, at/plain and at/gzip, when set (pull.sh's monitor reads them); else a temporary directory
+stream_at_dir=
 
 # where rel's bytes are appended: the copy for an append-only file, else its .part. A project may redefine it
 stream_target() {
@@ -79,7 +82,7 @@ stream_demux_files() {
     if [ "$d_have" -ne "$d_from" ]; then
       # read and dropped: into a file of its own when watched, so that a long one is seen to come
       d_skip=/dev/null
-      [ -z "$stream_at" ] || { d_skip=$stream_at.skip; printf '%s\n' "$d_skip" > "$stream_at"; }
+      [ -z "$stream_at" ] || { d_skip=$stream_at.skip; printf '%s\n0 0\n' "$d_skip" > "$stream_at"; }
       head -c "$d_len" > "$d_skip"
       if IFS= read -r h && [ "$h" = "-- $1" ]; then
         printf 'skip %s %s %s\n' "$d_rel" "$d_have" "$d_from" >&4
@@ -88,7 +91,7 @@ stream_demux_files() {
       printf 'short %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
       return 1
     fi
-    [ -z "$stream_at" ] || printf '%s\n' "$d_out" > "$stream_at"
+    [ -z "$stream_at" ] || printf '%s\n%s %s\n' "$d_out" "$d_have" "$d_len" > "$stream_at"
     head -c "$d_len" >> "$d_out"
     d_got=$(($(stat -c %s "$d_out") - d_have))
     if [ "$d_got" -ne "$d_len" ] || ! IFS= read -r h; then
@@ -108,6 +111,8 @@ stream_demux_files() {
       return 1
     fi
     printf 'done %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
+    # its bytes are counted by the done line now, not by its size
+    [ -z "$stream_at" ] || : > "$stream_at"
     { d_md5=$(md5sum < "$d_out"); printf 'here %s %s\n' "${d_md5%% *}" "$d_rel" >&4; } &
   done
   return 1
@@ -152,6 +157,7 @@ stream_bucket() {
   split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
   mkfifo "$b_tmp/fifo" || { rm -rf "$b_tmp"; return 1; }
   stream_at=$b_tmp/at
+  [ -z "$stream_at_dir" ] || stream_at=$stream_at_dir/$5
   b_rc=0
   for b_piece in "$b_tmp"/piece.*; do
     b_token=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
@@ -163,6 +169,7 @@ stream_bucket() {
     stream_call_end
     [ "$b_rc" -eq 0 ] || break
   done
+  [ -z "$stream_at_dir" ] || rm -f "$stream_at" "$stream_at.skip"
   stream_at=
   rm -rf "$b_tmp"
   return "$b_rc"

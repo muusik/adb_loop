@@ -46,8 +46,9 @@ pull_wait_tries=${ADB_LOOP_WAIT_TRIES:-15}
 pull_attempts=3
 zip="cat"; unzip="cat"
 pull_status_dir=${ADB_LOOP_STATUS_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/adb_loop}
-# the whole pull's progress, for the monitor: its pid while it runs, the bytes fetched, the file being written
-pull_monitor=; pull_done=0; pull_need=0; pull_out=; pull_from=0; pull_rel=; pull_n=0; pull_total=0; pull_state=
+# the whole pull's progress, for the monitor: its pid while it runs, the bytes fetched before the pass at hand (whose own
+# the monitor reads from the pass's lines and the buckets' files), the files done before it
+pull_monitor=; pull_done=0; pull_need=0; pull_n=0; pull_total=0; pull_state=
 
 # --- the rules, for a project to redefine after sourcing this; $1 is a path relative to pull_remote
 
@@ -74,9 +75,13 @@ pull_wanted() { return 0; }
 # the phone's command that lists what may be pruned, given the find arguments in $1 that select and print the old files.
 # Default: the whole directory
 pull_prune_find() { echo "find . $1"; }
-# for a file that needs more than the above, called first from fetch with rel, size, copy and have set. It may change
-# have, and sets pull_handled=yes when it has dealt with the file, its status then being fetch's. Default: nothing does
-pull_fetch_first() { return 0; }
+# for a file on the phone ($1, of $2 bytes) with neither a copy nor a .part here, before the first pass (a later one
+# would find the files that pass fetched, the old one's new name among them): it may put a file here at
+# $(stream_target "$1") that is the start of the phone's (one renamed on the phone, held here under its old name), and
+# only the rest is fetched. The pass hashes the whole after, as any append: one that was not the start is cut back and
+# kept as .stale (an append-only file) or dropped (a .part), so a project checks first what it cannot lose
+# (phone_md5). Its status is ignored. Default: nothing
+pull_seed() { return 0; }
 
 # --- what the steps say
 
@@ -117,45 +122,6 @@ pull_ask_gzip() {
   if [ -n "$(timeout 20 adb exec-out 'command -v gzip' | tr -d '\r')" ]; then zip="gzip -1"; unzip="gzip -dc"; fi
 }
 
-# the phone's bytes [from, to) of a file appended to a local file; fails when fewer arrived (the link dropped: what did
-# arrive is an exact prefix, kept)
-stream() {
-  rel=$1; from=$2; to=$3; out=$4
-  # time enough at 50 kB/s: a link that stalls ends the call, and the wait goes on from here
-  z=$zip; u=$unzip
-  if pull_compressed "$rel"; then z="cat"; u="cat"; fi
-  pull_out=$out; pull_from=$(stat -c %s "$out" 2>/dev/null || printf 0); pull_state=transferring
-  pull_progress
-  timeout $((60 + (to - from) / 50000)) adb exec-out "tail -c +$((from + 1)) '$pull_remote/$rel' | head -c $((to - from)) | $z" | $u >> "$out" 2>/dev/null
-  now=$(stat -c %s "$out")
-  pull_done=$((pull_done + now - pull_from)); pull_out=; pull_state=comparing
-  pull_progress
-  if [ "$now" -ne "$to" ]; then
-    echo "$rel: interrupted at $now of $to bytes" >&2
-    return 1
-  fi
-}
-
-# a file whose prefix may not hold, whole into <copy>.part (resumed while its prefix matches), then over the copy once
-# the md5 matches
-whole() {
-  rel=$1; size=$2; copy=$3
-  part="$copy.part"
-  got=0
-  [ -f "$part" ] && got=$(stat -c %s "$part")
-  if [ "$got" -gt "$size" ] || { [ "$got" -gt 0 ] && [ "$(local_md5 "$part")" != "$(phone_md5 "$rel" "$got")" ]; }; then
-    rm -f "$part"; got=0
-  fi
-  [ "$got" -gt 0 ] && echo "$rel: resuming at $got of $size bytes"
-  : >> "$part" && stream "$rel" "$got" "$size" "$part" || return 1
-  if [ "$(local_md5 "$part")" = "$(phone_md5 "$rel")" ]; then
-    mv "$part" "$copy"
-  else
-    rm -f "$part"
-    echo "$rel: changed on the phone while it was fetched (still being written?); the old copy stays, next run fetches it again" >&2
-  fi
-}
-
 # the copy moved aside before the phone's file is fetched whole: to <copy>.stale, or with a time stamp when one is there
 keep_stale() {
   rel=$1; copy=$2; why=$3
@@ -163,41 +129,6 @@ keep_stale() {
   [ -e "$stale" ] && stale="$copy.stale.$(date +%Y%m%d%H%M%S)"
   echo "$rel: $why — fetching whole, the old copy kept as $(basename "$stale")"
   mv "$copy" "$stale"
-}
-
-# one file, relative to pull_remote, of the given size on the phone
-fetch() {
-  rel=$1; size=$2
-  copy="$pull_dest/$rel"
-  mkdir -p "$(dirname "$copy")"
-  have=0
-  [ -f "$copy" ] && have=$(stat -c %s "$copy")
-  # an append-only file with no copy but the part of a whole fetch that a dropped link cut short (its old copy had been
-  # longer and went to .stale): go on from that part, its prefix checked below like any copy's
-  if [ "$have" -eq 0 ] && [ -f "$copy.part" ] && pull_append_only "$rel"; then
-    mv "$copy.part" "$copy" && have=$(stat -c %s "$copy")
-  fi
-  pull_handled=no
-  pull_fetch_first
-  pull_first_status=$?
-  [ "$pull_handled" = no ] || return "$pull_first_status"
-  if [ "$have" -eq "$size" ]; then
-    pull_same_size_is_same "$rel" && return 0
-    if [ "$size" -lt 1048576 ] && [ "$(local_md5 "$copy")" != "$(phone_md5 "$rel")" ]; then
-      echo "$rel: changed in place, fetching $size bytes"
-      whole "$rel" "$size" "$copy"
-    fi
-  elif [ "$have" -gt "$size" ]; then
-    keep_stale "$rel" "$copy" "local $have bytes, phone $size" && whole "$rel" "$size" "$copy"
-  elif pull_append_only "$rel" && { [ "$have" -eq 0 ] || [ "$(local_md5 "$copy")" = "$(phone_md5 "$rel" "$have")" ]; }; then
-    echo "$rel: appending $((size - have)) bytes ($have → $size)"
-    : >> "$copy" && stream "$rel" "$have" "$size" "$copy"
-  elif [ "$have" -gt 0 ] && pull_append_only "$rel"; then
-    keep_stale "$rel" "$copy" "not the start of the phone's file ($have bytes here, $size there)" && whole "$rel" "$size" "$copy"
-  else
-    echo "$rel: fetching $size bytes"
-    whole "$rel" "$size" "$copy"
-  fi
 }
 
 # every file under the given directories (relative, "." for all), as "size path" lines
@@ -223,8 +154,31 @@ pull_plan() {
 pull_progress() {
   [ -n "$pull_monitor" ] || return 0
   [ $# -eq 0 ] || pull_activity=$1
-  printf '%s\n' "$pull_state" "$pull_n" "$pull_total" "$pull_done" "$pull_need" "$pull_out" "$pull_from" "$pull_rel" \
-    "$pull_activity" > "$pull_pf.tmp" && mv -f "$pull_pf.tmp" "$pull_pf"
+  printf '%s\n' "$pull_state" "$pull_n" "$pull_total" "$pull_done" "$pull_need" "$pull_activity" > "$pull_pf.tmp" &&
+    mv -f "$pull_pf.tmp" "$pull_pf"
+}
+
+# The pass at hand, while its calls run, as "bytes files rel": the bytes and files that came (the pass's done lines),
+# plus what the buckets' files at hand have grown by; rel the one of them with the most still to come
+pull_pass_live() {
+  l_b=0; l_n=0
+  read -r l_b l_n <<EOF
+$(awk '$1 == "done" { b += $NF; n++ } END { printf "%.0f %d\n", b, n }' "$pull_tmp.lines" 2>/dev/null)
+EOF
+  l_rel=; l_most=-1
+  for l_at in "$pull_tmp.at"/*; do
+    l_out=; l_have=0; l_len=0
+    { read -r l_out; read -r l_have l_len; } < "$l_at" 2>/dev/null
+    [ -n "$l_out" ] && [ "${l_len:-0}" -gt 0 ] || continue
+    l_got=$(($(stat -c %s "$l_out" 2>/dev/null || echo "$l_have") - l_have))
+    [ "$l_got" -ge 0 ] || l_got=0
+    [ "$l_got" -le "$l_len" ] || l_got=$l_len
+    l_b=$((${l_b:-0} + l_got))
+    if [ $((l_len - l_got)) -gt "$l_most" ]; then
+      l_most=$((l_len - l_got)); l_rel=${l_out#"$pull_dest/"}; l_rel=${l_rel%.part}
+    fi
+  done
+  echo "${l_b:-0} ${l_n:-0} $l_rel"
 }
 
 pull_cols() {
@@ -245,20 +199,21 @@ pull_monitor_loop() {
   m_hist=
   m_hints=$(link_hints | paste -sd ';' - | sed 's/;/; /g')
   m_cols=$(pull_cols)
-  p_state=listing; p_n=0; p_total=0; p_done=0; p_need=0; p_out=; p_from=0; p_rel=; p_act=
+  p_state=listing; p_n=0; p_total=0; p_done=0; p_need=0; p_act=
   while :; do
     m_now=$(date +%s)
-    { read -r p_state; read -r p_n; read -r p_total; read -r p_done; read -r p_need; read -r p_out; read -r p_from
-      read -r p_rel; read -r p_act; } < "$pull_pf" 2>/dev/null
+    { read -r p_state; read -r p_n; read -r p_total; read -r p_done; read -r p_need; read -r p_act; } < "$pull_pf" 2>/dev/null
     kill -0 "$main" 2>/dev/null || p_state=stopped
-    m_live=${p_done:-0}
-    if [ -n "$p_out" ]; then
-      m_size=$(stat -c %s "$p_out" 2>/dev/null || printf '%s' "$p_from")
-      m_live=$((m_live + m_size - p_from))
+    m_live=${p_done:-0}; m_n=${p_n:-0}; m_rel=
+    if [ "$p_state" = transferring ]; then
+      read -r m_b m_c m_rel <<EOF
+$(pull_pass_live)
+EOF
+      m_live=$((m_live + m_b)); m_n=$((m_n + m_c))
     fi
     m_dt=$((m_now - m_last_t))
     if [ "$m_dt" -ge 1 ]; then
-      if [ -n "$p_out" ] && [ "$m_live" -eq "$m_last" ]; then m_still=$((m_still + m_dt)); else m_still=0; fi
+      if [ "$p_state" = transferring ] && [ "$m_live" -eq "$m_last" ]; then m_still=$((m_still + m_dt)); else m_still=0; fi
       m_last_t=$m_now; m_last=$m_live
       # time:bytes once a second or so, the last half minute of them. The rate shown is over the last 5 s; the time left
       # is from the last 30 s, since a link in power save comes in bursts and stalls of ten seconds and more
@@ -299,6 +254,7 @@ pull_monitor_loop() {
         if [ "$m_still" -ge 5 ]; then m_l1="$m_l1 | stalled $(pull_dur "$m_still")"
         else m_l1="$m_l1 | $(pull_rate "$m_rate")"; fi
         [ -z "$m_eta" ] || m_l1="$m_l1 | about $(pull_dur "$m_eta") left"
+        [ -z "$m_rel" ] || m_l1="$m_l1 | $m_n of ${p_total:-0}: ${m_rel##*/}"
         [ -z "$p_act" ] || m_l1="$m_l1 | $p_act" ;;
     esac
     m_l2=$(link_summary)
@@ -309,7 +265,7 @@ pull_monitor_loop() {
     esac
     { printf '%s=%s\n' version 1 pid "$main" label "$pull_label" dest "$pull_dest" serial "${ANDROID_SERIAL:-}" \
         state "$p_state" started "$m_t0" updated "$m_now" elapsed_s "$m_elapsed" \
-        files_done "$p_n" files "$p_total" file "$p_rel" activity "$p_act" \
+        files_done "$m_n" files "$p_total" file "$m_rel" activity "$p_act" \
         bytes_done "$m_live" bytes_total "$m_total" rate "$m_rate" eta_s "$m_eta" stalled_s "$m_still" \
         wifi "$link_wifi" wifi_gen "$link_gen" wifi_std "$link_std" ssid "$link_ssid" band "$link_band" \
         channel "$link_channel" rssi "$link_rssi" signal "$link_signal" link_mbps "$link_tx" link_max_mbps "$link_txmax" \
@@ -352,7 +308,7 @@ pull_monitor_start() {
     pull_label=$(printf '%s' "$pull_remote" | sed -n 's#.*/Android/data/\([^/]*\)/.*#\1#p')
     [ -n "$pull_label" ] || pull_label=$(basename "$pull_dest")
   fi
-  pull_done=0; pull_need=0; pull_out=; pull_n=0; pull_total=0; pull_state=listing; pull_activity=
+  pull_done=0; pull_need=0; pull_n=0; pull_total=0; pull_state=listing; pull_activity=
   pull_monitor=starting
   pull_progress "listing the files on the phone"
   pull_monitor_loop $$ &
@@ -363,7 +319,6 @@ pull_monitor_start() {
 pull_monitor_stop() {
   [ -n "$pull_monitor" ] || return 0
   if [ "$1" -eq 0 ]; then pull_state="done"; else pull_state="failed"; fi
-  pull_out=
   pull_progress
   kill -USR1 "$pull_monitor" 2>/dev/null
   wait "$pull_monitor" 2>/dev/null
@@ -414,9 +369,7 @@ pull_all() {
   return "$pull_rc"
 }
 
-# --- the passes (stream.sh): every file in one plan, sent in a few calls at once, then planned again from what that left.
-# The header above still tells the per-file way (fetch, whole, stream), which no longer runs: kept for the files a
-# project's pull_fetch_first claims (docs/streamed-pull.org, Step 5), and phone_md5 for prune_phone's held.
+# --- the passes (stream.sh): every file in one plan, sent in a few calls at once, then planned again from what that left
 
 # the listing into list; once more after waiting for the phone when it came empty. Fails when the phone has gone
 pull_list() {
@@ -435,6 +388,16 @@ pull_classify() {
     c_m=0; pull_same_size_is_same "$c_r" && c_m=1
     printf '%s %s %s %s\n' "$c_s" "$c_a" "$c_m" "$c_r"
   done > "$pull_tmp.remote"
+}
+
+# the files on the phone ($pull_tmp.remote) with neither a copy nor a .part here, each offered to pull_seed
+pull_pass_seed() {
+  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  awk 'FILENAME == ARGV[1] { p = $0; sub(/^[0-9]+ /, "", p); loc[p] = 1; next }
+       { r = $0; sub(/^[0-9]+ [01] [01] /, "", r); if (!(r in loc) && !((r ".part") in loc)) print $1, r }' \
+    "$pull_tmp.local" "$pull_tmp.remote" > "$pull_tmp.new"
+  while read -r n_size n_rel <&3; do pull_seed "$n_rel" "$n_size" < /dev/null; done 3< "$pull_tmp.new"
+  rm -f "$pull_tmp.local" "$pull_tmp.new"
 }
 
 # A pass's work into $pull_tmp.todo, from the phone's files ($pull_tmp.remote), the sizes here and what the passes before
@@ -576,11 +539,14 @@ pull_files() {
   if ! pull_list "$@"; then echo "the phone went away while listing; run again" >&2; return 1; fi
   if [ -z "$list" ]; then echo "nothing to pull under $* on the phone" >&2; return 0; fi
   pull_classify "$list"
+  pull_pass_seed
   pull_plan
   if [ "$pull_need" -gt 0 ]; then
     echo "comparing $pull_total files with this machine's copies; about $(pull_bytes "$pull_need") to fetch, in $pull_need_files"
   else echo "comparing $pull_total files with this machine's copies"; fi
   : > "$pull_tmp.state"
+  stream_at_dir=$pull_tmp.at
+  mkdir -p "$stream_at_dir"
   f_pass=0; f_stuck=0; f_rc=0
   while :; do
     f_pass=$((f_pass + 1))
@@ -620,6 +586,7 @@ EOF
   done
   pull_pass_end || f_rc=1
   rm -f "$pull_tmp.remote" "$pull_tmp.todo" "$pull_tmp.state" "$pull_tmp.lines"
+  rm -rf "$stream_at_dir"; stream_at_dir=
   [ "$f_rc" -eq 0 ] || return 1
   pull_n=$pull_total
   echo "all $pull_total files compared"
