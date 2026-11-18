@@ -9,20 +9,23 @@
 # container a directory on the container's own root goes with it, and the prune would have deleted the phone's copy:
 # a pull there exits 2 and names .bl-mounts, the file that mounts the host's directory.
 #
-# adb has no rsync (adb sync is for system images, push --sync is push-only), so each file on the phone is compared with
-# the copy here. The same size: skipped, unless pull_same_size_is_same says otherwise and it is under 1 MB, when its md5
-# decides. An append-only file that the copy is a prefix of (its md5 against the phone's first bytes), or that has no
-# copy, has only its tail fetched, up to the size listed, so a file still growing is taken as far as the listing saw it.
-# An append-only copy that is not the start of the phone's file, or any copy longer than the phone's, is kept as .stale
-# before the whole file comes. A whole file goes into <copy>.part and replaces the copy once its md5 is the phone's.
+# adb has no rsync (adb sync is for system images, push --sync is push-only), so pull_all lists the phone's files and
+# plans a pass from the sizes here, which stream.sh sends in a few calls at once: the files pull_compressed names plain,
+# the rest through the phone's gzip, and the phone's hashes alongside (docs/streamed-pull.org). An append-only file gets
+# its tail onto its copy, up to the size listed, so a file still growing is taken as far as the listing saw it; any
+# other file comes whole into <copy>.part, which replaces the copy once its md5 is the phone's. A copy of the phone's
+# size is left alone when pull_same_size_is_same says so or it is 1 MB or more; else its md5 is compared in the same
+# calls, and it is fetched whole in the next pass when it differs. A copy longer than the phone's is kept as .stale
+# before the whole file comes, and so is an append-only one that turns out, once its tail is in, not to be the start of
+# the phone's file. Before the first pass pull_seed may put in place the start of a file that has no copy.
 #
-# Every transfer resumes: the bytes go through the phone's gzip and are unpacked here as they come, and a link that drops
-# leaves an exact prefix (gunzip writes what it has decoded). adb pull would delete what it got. Without a gzip on the
-# phone the bytes go plain, and so do a file's that pull_compressed names: gzip would cost the phone's CPU and save
-# nothing. When a transfer stops, the pull waits for the phone and goes on from there, up to
-# ADB_LOOP_WAIT_TRIES tries of it answering (default 15, about half a minute or more) and 3 attempts at a file. Android
-# restarts adbd when the screen is locked or unlocked, if Developer options' "Default USB configuration" is anything but
-# "No data transfer". A phone that does not come back ends the pull with exit 1; the next run goes on.
+# Every transfer resumes: a link that drops leaves an exact prefix (gunzip writes what it has decoded; without a gzip on
+# the phone the bytes go plain), and adb pull would delete what it got. A pass that did not end clean is followed, once
+# the phone answers again (up to ADB_LOOP_WAIT_TRIES tries, default 15, about half a minute or more), by one planned
+# from what it left, with 3 attempts at a file across the passes; 3 passes in a row that bring nothing end the pull. A
+# call that writes nothing here for ADB_LOOP_STALL seconds (60) is ended, and its pass with it. Android restarts adbd
+# when the screen is locked or unlocked, if Developer options' "Default USB configuration" is anything but "No data
+# transfer". A phone that does not come back ends the pull with exit 1; the next run goes on.
 #
 # prune_phone removes files not modified for KEEP_DAYS days (default 7) of the kinds pull_prunable_kind names, each only
 # once the copy here is byte for byte the phone's (size and md5).

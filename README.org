@@ -11,9 +11,14 @@ sign_reader and squiggle_snap. So far:
   of a project's scripts by place.
 - =phone.sh= :: reaching the phone: the address to use, whether it really answers, waiting for a
   link that dropped.
-- =pull.sh= :: a directory of an app's mirrored here as deltas: each transfer resumes, a dropped
-  link is waited for and gone on from, and old files held here byte for byte can be pruned from the
-  phone. While it runs it shows the whole pull's progress and time left, and the link (below).
+- =pull.sh= :: a directory of an app's mirrored here as deltas, in passes: each transfer resumes, a
+  dropped link is waited for and gone on from, and old files held here byte for byte can be pruned
+  from the phone. While it runs it shows the whole pull's progress and time left, and the link
+  (below).
+- =stream.sh= :: a pass's files in a few adb calls at once instead of one a file, for =pull.sh=: the
+  already compressed files plain, the rest through the phone's gzip, framed so that a dropped link
+  leaves an exact prefix, and a third call with the phone's hashes, which each file here is checked
+  against as it comes (docs/streamed-pull.org).
 - =link.sh= :: the link to the phone in words: the Wi-Fi generation (Wi-Fi 4/5/6/7, as
   802.11n/ac/ax/be), the band and channel, the access point's name, the signal, the rate the phone
   sends at, whether the screen is off and Wi-Fi's power save with it, battery saver, a VPN on the
@@ -27,11 +32,6 @@ sign_reader and squiggle_snap. So far:
   pre-commit hook on the lines a commit adds, or over every =.org= file with =--all=.
 
 Where a pull lands, the same rule for every project: =docs/data-dirs.org=, with its plan.
-
-A plan, under way: a pull in three calls at once instead of one a file, the already compressed files
-plain, the rest through the phone's gzip, and the phone's hashes, with the same exact prefixes on a
-dropped link; =pull_all= runs in such passes through =stream.sh= since its Step 3, not yet taken up
-by the projects (=docs/streamed-pull.org=).
 
 A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
 and two copies off the phone before a log leaves it (=docs/annex.org=).
