@@ -30,7 +30,8 @@ Where a pull lands, the same rule for every project: =docs/data-dirs.org=, with 
 
 A plan, under way: a pull in three calls at once instead of one a file, the already compressed files
 plain, the rest through the phone's gzip, and the phone's hashes, with the same exact prefixes on a
-dropped link; =stream.sh= has the prototype, not yet used by =pull_all= (=docs/streamed-pull.org=).
+dropped link; =pull_all= runs in such passes through =stream.sh= since its Step 3, not yet taken up
+by the projects (=docs/streamed-pull.org=).
 
 A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
 and two copies off the phone before a log leaves it (=docs/annex.org=).

@@ -7,10 +7,11 @@ most of the time a pull takes. =stream.sh= sends a whole plan of files in one ca
 (already compressed files plain, the rest through the phone's gzip), with a third call at the same
 time carrying the phone's hashes, while keeping what =pull.sh='s transfers promise: whatever a
 dropped link leaves is an exact prefix, and the next run goes on from it. Proposed and prototyped in
-chat on 2026-11-18. =stream.sh= is sourced beside =pull.sh= but nothing calls it yet: =pull_all= is
-unchanged until /Step 6/.
+chat on 2026-11-18. Since /Step 3/ =pull.sh= sources =stream.sh= and =pull_all= runs in passes; the
+projects take it up with their submodule's commit in /Step 6/, bsfc_mapper not before /Step 5/ (its
+=pull_fetch_first=).
 
-* Current (2026-11-18, stream.sh as a prototype)
+* Current (2026-11-18, pull_all in passes)
 
 A plan is lines =from len rel=: the phone's bytes [from, from + len) of a file below =pull_remote=.
 =stream_plan= splits it by =pull_compressed= into a plain bucket and a gzip bucket and makes three
@@ -48,7 +49,24 @@ optimistic: the copy here is no longer checked to be the start of the phone's fi
 is fetched, only after, which costs the tail's bytes in the rare case that it was not.
 
 The lines of a call go into one file: =done=, =cut=, =short=, =skip= from the streams, =here= and
-=phone= hashes, and the verdicts =ok=, =bad=, =unverified=.
+=phone= hashes, and the verdicts =ok=, =bad=, =unverified=; for a copy compared by hash, =check= and
+its =copy= hash, and =same=, =differs= or =unchecked=.
+
+** Passes
+
+=pull_files= lists the phone's files and plans a pass from the sizes here: an append-only file's
+tail onto its copy, any other file whole into its =.part= (one already of the phone's size only
+hashed). A copy of the phone's size is left alone when =pull_same_size_is_same= says so or it is 1
+MB or more; else it is compared by hash in the same calls, and fetched whole in the next pass when
+it differs. A copy longer than the phone's, or an append-only one that differs, goes to =.stale=
+first.
+
+A pass that did not end clean is followed, after =phone_wait=, by a new listing and a pass planned
+from what it left: a file =cut= or =short= goes on from its size, one =bad= from its start, one
+=unverified= is only hashed. Each file has =pull_attempts= (3) across the passes, and three passes
+in a row that bring nothing end the pull. An append whose hash never came is cut back at the end to
+the size it had before, so that the next run fetches it again; an unverified =.part= stays, and the
+next run hashes it.
 
 ** Measured (2026-11-18, sign_reader's files, Z2 Force on 5 GHz Wi-Fi)
 
@@ -83,7 +101,7 @@ files get their range hashed.
 
 Done 2026-11-18 (fc35522).
 
-** TODO Step 3: Passes in pull_all
+** DONE Step 3: Passes in pull_all
 
 Library. =pull_files= makes a plan from the listing and the copies here and runs =stream_plan= on
 it, then plans again from what that left, until nothing is left or the attempts are spent: a file
@@ -96,6 +114,16 @@ passes. The per-file path stays in =pull.sh= for /Step 5/, and =phone_md5= for =
 
 Check: =tests/test_pull.py= passes over the new =pull_files= (its cuts are per call, so some will
 need the stream's terms), and its /Flat/ and /App/ shapes give the same files as before.
+
+Done 2026-11-18 (18db74a). Not as planned: =pull_fetch_first= is not called until /Step 5/, since
+the per-file =fetch= no longer runs; an append-only copy of the phone's size that differs (only
+where a project says its size is not enough) goes to =.stale= instead of being replaced; a bad
+append is cut back to what it was before it is kept aside, so the =.stale= holds the old copy alone.
+New tests in =tests/test_pull.py= (/Passes/): one call a bucket for 60 files, a pass of hashes only,
+an append never verified, a whole =.part= from an earlier run, a file shorter than listed, passes
+that bring nothing. On the phone: sign_reader's 151 =.tsv= files into a scratch directory, one pass
+(1 min 42 s on a weak signal, -81 dBm), a second run fetching nothing, every file the phone's
+=md5sum=.
 
 ** TODO Step 4: A watchdog for a stalled call
 
