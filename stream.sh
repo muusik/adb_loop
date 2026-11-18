@@ -1,8 +1,8 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2154  # pull_dest, pull_remote, zip, unzip: set by pull.sh and the project
-# stream.sh (prototype, not used by pull.sh yet): many files' bytes in one adb call, framed so that this side can split
-# them again. Sourced after pull.sh, whose pull_remote, pull_dest, rules (pull_compressed, pull_append_only) and gzip
-# (pull_ask_gzip) it uses.
+# stream.sh: many files' bytes in one adb call, framed so that this side can split them again. Sourced by pull.sh, whose
+# pull_files makes the plans (the passes), and whose pull_remote, pull_dest, rules (pull_compressed, pull_append_only)
+# and gzip (pull_ask_gzip) it uses.
 #
 # A plan is lines "from len rel": the phone's bytes [from, from + len) of rel, below pull_remote. The phone sends, for
 # each line, a header "len from rel", then the bytes, then a line "-- TOKEN", the token new for each call; after the last
@@ -20,8 +20,9 @@
 # len), what the file here will be once it came. The whole files' in one md5sum, an append-only file's through head -c.
 # Here each file is hashed as soon as its bytes are in, in the background, while the next ones come. Once the calls
 # end, a file whose hashes agree is taken (a .part goes over its copy); one whose do not is dropped (a .part) or kept
-# aside as .stale (an append-only copy, then not the start of the phone's file), and fetched again; one whose phone hash
-# did not come stays as it is, for a hash in the next pass.
+# aside as .stale (an append-only copy, cut back to what it was: not the start of the phone's file), and fetched again;
+# one whose phone hash did not come stays as it is, for a hash in the next pass. A line of length 0 is only hashed, and
+# copies already of the phone's size can be given to be compared.
 #
 # A stream that stops early leaves the file at hand an exact prefix, as pull.sh's transfers do: a plan made again from
 # the sizes here goes on from there.
@@ -180,24 +181,32 @@ stream_hashes() {
   return "$b_rc"
 }
 
-# The files done in a pass, by the lines in $1 (a later hash of a file over an earlier): taken, dropped or kept aside, each with a line into $1: "ok rel", "bad
-# rel" or "unverified rel". Fails when any was not ok.
+# The files of a pass, by the lines in $1 (a later hash of a file over an earlier), each with a verdict into $1. A file
+# done: "ok rel" (taken: a .part goes over its copy), "bad rel" (a .part dropped; an append-only copy cut back to what it
+# was before and kept aside, as not the start of the phone's file), "unverified rel" (as it is). A copy checked: "same
+# rel", "differs rel" or "unchecked rel", nothing changed. Fails when any was not ok or same.
 stream_verify() {
   awk '{ t = $1; r = $0
-         if (t == "done") { sub(/^done /, "", r); sub(/ [0-9]+ [0-9]+$/, "", r); done[r] = 1; order[++n] = r }
-         else if (t == "here" || t == "phone") { sub(/^[a-z]+ [^ ]* /, "", r); h[t, r] = $2 } }
+         if (t == "done") { sub(/^done /, "", r); sub(/ [0-9]+ [0-9]+$/, "", r); from[r] = $(NF - 1); order[++n] = r }
+         else if (t == "check") { sub(/^check /, "", r); checked[++m] = r }
+         else if (t == "here" || t == "phone" || t == "copy") { sub(/^[a-z]+ [^ ]* /, "", r); h[t, r] = $2 } }
        END { for (i = 1; i <= n; i++) { r = order[i]
-               if ((("here", r) in h) && (("phone", r) in h)) print (h["here", r] == h["phone", r] ? "ok" : "bad"), r
-               else print "unverified", r } }' "$1" > "$1.verdicts"
+               if ((("here", r) in h) && (("phone", r) in h)) print (h["here", r] == h["phone", r] ? "ok" : "bad"), from[r], r
+               else print "unverified", from[r], r }
+             for (i = 1; i <= m; i++) { r = checked[i]
+               if ((("copy", r) in h) && (("phone", r) in h)) print (h["copy", r] == h["phone", r] ? "same" : "differs"), 0, r
+               else print "unchecked", 0, r } }' "$1" > "$1.verdicts"
   v_rc=0
-  while read -r v_what v_rel; do
+  while read -r v_what v_from v_rel; do
     v_out=$(stream_target "$v_rel")
     case "$v_what" in
       ok) [ "$v_out" = "$pull_dest/$v_rel" ] || mv "$v_out" "$pull_dest/$v_rel" ;;
+      same) ;;
       bad)
         v_rc=1
-        if [ "$v_out" = "$pull_dest/$v_rel" ]; then
-          keep_stale "$v_rel" "$v_out" "not the phone's bytes once appended to"
+        if [ "$v_out" = "$pull_dest/$v_rel" ] && [ "$v_from" -gt 0 ]; then
+          truncate -s "$v_from" "$v_out"
+          keep_stale "$v_rel" "$v_out" "not the start of the phone's file ($v_from bytes here)"
         else
           rm -f "$v_out"
           echo "$v_rel: not the phone's bytes (changed while it was fetched?); fetched again in the next pass" >&2
@@ -210,26 +219,50 @@ stream_verify() {
   return "$v_rc"
 }
 
+# Here, while the calls run: the lines of a plan ($1) with nothing to fetch, their target hashed as it is ("done",
+# "here"), and the copies to check ($2, "size rel"), hashed ("check", "copy"); into $3
+stream_here() {
+  printf '%s\n' "$1" | while read -r e_f _ e_r; do
+    [ -n "$e_r" ] || continue
+    e_out=$(stream_target "$e_r")
+    # an empty file is all there: its target made
+    [ "$e_f" -gt 0 ] || [ -e "$e_out" ] || { mkdir -p "${e_out%/*}" && : > "$e_out"; }
+    e_m=$(md5sum 2>/dev/null < "$e_out") || continue
+    printf 'done %s %s 0\nhere %s %s\n' "$e_r" "$e_f" "${e_m%% *}" "$e_r"
+  done >> "$3"
+  printf '%s\n' "$2" | while read -r _ e_r; do
+    [ -n "$e_r" ] || continue
+    e_m=$(md5sum 2>/dev/null < "$pull_dest/$e_r") || continue
+    printf 'check %s\ncopy %s %s\n' "$e_r" "${e_m%% *}" "$e_r"
+  done >> "$3"
+}
+
 # A plan ($1) in three calls at once: the files that pull_compressed names, plain; the rest through the phone's gzip;
-# the hashes of all. The lines into the file $2, made new. Fails when a call stopped early or a file was not verified.
+# the hashes of all. A line of length 0 is only hashed, its target as it is. The copies in $3 ("size rel"), already the
+# phone's size, are hashed as well and compared. The lines into the file $2, made new. Fails when a call stopped early,
+# a file was not verified or a copy differs.
 stream_plan() {
-  s_plain=; s_packed=
+  s_plain=; s_packed=; s_here=
   s_nl='
 '
   while read -r s_f s_l s_r; do
     [ -n "$s_r" ] || continue
-    if pull_compressed "$s_r"; then s_plain="$s_plain$s_f $s_l $s_r$s_nl"
+    if [ "$s_l" -eq 0 ]; then s_here="$s_here$s_f $s_l $s_r$s_nl"
+    elif pull_compressed "$s_r"; then s_plain="$s_plain$s_f $s_l $s_r$s_nl"
     else s_packed="$s_packed$s_f $s_l $s_r$s_nl"; fi
   done <<EOF
 $1
 EOF
+  s_hash=$1
+  [ -z "${3:-}" ] || s_hash="$s_hash$s_nl$(printf '%s\n' "$3" | sed '/./s/^/0 /')"
   : > "$2"
   stream_bucket "$s_plain" cat cat "$2" &
   s_plain_pid=$!
   stream_bucket "$s_packed" "$zip" "$unzip" "$2" &
   s_packed_pid=$!
-  stream_hashes "$1" "$2" &
+  stream_hashes "$s_hash" "$2" &
   s_hash_pid=$!
+  stream_here "$s_here" "${3:-}" "$2"
   wait "$s_plain_pid"; s_rc1=$?
   wait "$s_packed_pid"; s_rc2=$?
   wait "$s_hash_pid"; s_rc3=$?

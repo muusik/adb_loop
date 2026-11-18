@@ -37,6 +37,7 @@
 # shellcheck disable=SC1091,SC2154  # set by loop/project.sh
 . "$adb_loop_path/phone.sh"
 . "$adb_loop_path/link.sh"
+. "$adb_loop_path/stream.sh"
 
 keep_days=${KEEP_DAYS:-7}
 # shellcheck disable=SC2034  # for a project's pull_prunable_kind
@@ -204,19 +205,17 @@ list_files() {
   timeout 60 adb exec-out "cd '$pull_remote' 2>/dev/null && find $* -type f -exec stat -c '%s %n' {} + 2>/dev/null" | tr -d '\r' | sed 's| \./| |'
 }
 
-# how much there is to fetch, by the sizes here and there: pull_need bytes in pull_need_files files, pull_total wanted.
-# A same-size file counts as nothing, an append-only copy that turns out not to be the start as its tail: an estimate
+# how much there is to fetch, by the sizes here and there (pull_classify's): pull_need bytes in pull_need_files files,
+# pull_total wanted. A same-size file counts as nothing, an append-only copy that turns out not to be the start as its
+# tail: an estimate
 pull_plan() {
-  printf '%s\n' "$1" | while read -r s r; do
-    [ -n "$r" ] && pull_wanted "$r" && printf '%s %s\n' "$s" "$r"
-  done > "$pull_tmp.remote"
   find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
   # shellcheck disable=SC2046  # three numbers
   set -- $(awk 'FILENAME == ARGV[1] { p = $0; sub(/^[0-9]+ /, "", p); have[p] = $1 + 0; next }
-    NF >= 2 { p = $0; sub(/^[0-9]+ /, "", p); s = $1 + 0; h = (p in have) ? have[p] : 0; n++
+    NF >= 4 { p = $0; sub(/^[0-9]+ [01] [01] /, "", p); s = $1 + 0; h = (p in have) ? have[p] : 0; n++
               if (s > h) { need += s - h; files++ } else if (s < h) { need += s; files++ } }
     END { printf "%.0f %d %d\n", need, files, n }' "$pull_tmp.local" "$pull_tmp.remote")
-  rm -f "$pull_tmp.local" "$pull_tmp.remote"
+  rm -f "$pull_tmp.local"
   pull_need=${1:-0}; pull_need_files=${2:-0}; pull_total=${3:-0}
 }
 
@@ -415,52 +414,213 @@ pull_all() {
   return "$pull_rc"
 }
 
-# The lists go in on fd 3: in the same shell, so that a phone found again at another address stays found, and away from
-# the standard input that adb shell reads.
+# --- the passes (stream.sh): every file in one plan, sent in a few calls at once, then planned again from what that left.
+# The header above still tells the per-file way (fetch, whole, stream), which no longer runs: kept for the files a
+# project's pull_fetch_first claims (docs/streamed-pull.org, Step 5), and phone_md5 for prune_phone's held.
+
+# the listing into list; once more after waiting for the phone when it came empty. Fails when the phone has gone
+pull_list() {
+  list=$(list_files "$@")
+  [ -z "$list" ] || return 0
+  phone_wait "$pull_wait_tries" || return 1
+  list=$(list_files "$@")
+}
+
+# the wanted files of a listing ($1) as "size a same rel" into $pull_tmp.remote: a 1 when pull_append_only, same 1
+# when pull_same_size_is_same
+pull_classify() {
+  printf '%s\n' "$1" | while read -r c_s c_r; do
+    [ -n "$c_r" ] && pull_wanted "$c_r" || continue
+    c_a=0; pull_append_only "$c_r" && c_a=1
+    c_m=0; pull_same_size_is_same "$c_r" && c_m=1
+    printf '%s %s %s %s\n' "$c_s" "$c_a" "$c_m" "$c_r"
+  done > "$pull_tmp.remote"
+}
+
+# A pass's work into $pull_tmp.todo, from the phone's files ($pull_tmp.remote), the sizes here and what the passes before
+# left ($pull_tmp.state: "fails N rel", "unverified FROM rel", "differs rel"). Lines, in the order they are done:
+#   promote rel      an append-only file's .part, left by a whole fetch cut short, becomes its copy
+#   drop rel         a .part longer than the phone's file goes
+#   stale H S rel    the copy goes aside (keep_stale): longer than the phone's (H > S), or an append-only one that differs
+#   giveup rel       its attempts are spent
+#   plan F L rel     the phone's bytes [F, F + L) into its target (L 0: only hashed)
+#   check S rel      a copy of the phone's size, compared by hash
+# An append-only file's tail goes onto its copy, any other file whole into its .part (a .part of the phone's size only
+# hashed). A same-size copy is left alone when pull_same_size_is_same, or when it is 1 MB or more; else checked, and
+# fetched whole once it differs.
+pull_pass_todo() {
+  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  awk -v max="$pull_attempts" '
+    FILENAME == ARGV[1] { r = $0
+      if ($1 == "fails") { sub(/^fails [0-9]+ /, "", r); fails[r] = $2 }
+      else if ($1 == "unverified") { sub(/^unverified [0-9]+ /, "", r); unv[r] = 1 }
+      else if ($1 == "differs") { sub(/^differs /, "", r); dif[r] = 1 }
+      next }
+    FILENAME == ARGV[2] { p = $0; sub(/^[0-9]+ /, "", p); loc[p] = $1 + 0; next }
+    { s = $1 + 0; a = $2 + 0; same = $3 + 0; r = $0; sub(/^[0-9]+ [01] [01] /, "", r)
+      h = (r in loc) ? loc[r] : -1; p = ((r ".part") in loc) ? loc[r ".part"] : -1
+      if (fails[r] + 0 >= max) { print "giveup", r; next }
+      if (a) {
+        if (h < 0 && p >= 0) { print "promote", r; h = p; p = -1 }
+        if ((r in unv) && h == s) { print "plan", s, 0, r; next }
+        if (h > s || (h > 0 && (r in dif))) { print "stale", h, s, r; print "plan", 0, s, r; next }
+        if (h < 0) h = 0
+        if (h == s) { if (!same && s < 1048576) print "check", s, r; next }
+        print "plan", h, s - h, r; next
+      }
+      if ((r in unv) && p == s) { print "plan", s, 0, r; next }
+      if (h > s) print "stale", h, s, r
+      else if (h == s && !(r in dif)) { if (!same && s < 1048576) print "check", s, r; next }
+      if (p > s) { print "drop", r; p = -1 }
+      if (p < 0) p = 0
+      print "plan", p, s - p, r
+    }' "$pull_tmp.state" "$pull_tmp.local" "$pull_tmp.remote" > "$pull_tmp.todo"
+  rm -f "$pull_tmp.local"
+}
+
+# what pull_pass_todo said to do before the calls
+pull_pass_prepare() {
+  while read -r t_what t_rest; do
+    case "$t_what" in
+      promote) mv "$pull_dest/$t_rest.part" "$pull_dest/$t_rest" ;;
+      drop) rm -f "$pull_dest/$t_rest.part" ;;
+      stale)
+        t_h=${t_rest%% *}; t_rest=${t_rest#* }; t_s=${t_rest%% *}; t_rest=${t_rest#* }
+        if [ "$t_h" -gt "$t_s" ]; then keep_stale "$t_rest" "$pull_dest/$t_rest" "local $t_h bytes, phone $t_s"
+        else keep_stale "$t_rest" "$pull_dest/$t_rest" "changed on the phone at the same size"; fi ;;
+    esac
+  done < "$pull_tmp.todo"
+}
+
+# The state after a pass, from the one before, the pass's todo and its lines: a file that did not come or was not
+# verified has one attempt less; one done but unverified keeps the size it had before, to be cut back to if it never is
+pull_pass_state() {
+  awk 'FILENAME == ARGV[1] { r = $0
+         if ($1 == "fails") { sub(/^fails [0-9]+ /, "", r); fails[r] = $2 }
+         else if ($1 == "unverified") { sub(/^unverified [0-9]+ /, "", r); unv[r] = $2 }
+         else if ($1 == "differs") { sub(/^differs /, "", r); dif[r] = 1 }
+         next }
+       FILENAME == ARGV[2] { if ($1 == "plan") { r = $0; sub(/^plan [0-9]+ [0-9]+ /, "", r); delete dif[r] } next }
+       { t = $1; r = $0 }
+       t == "done" { sub(/^done /, "", r); sub(/ [0-9]+ [0-9]+$/, "", r); from[r] = $(NF - 1); next }
+       t == "cut" || t == "short" || t == "skip" { sub(/^[a-z]+ /, "", r); sub(/ [0-9]+ [0-9]+$/, "", r)
+                                                   fails[r]++; delete unv[r]; next }
+       t == "ok" || t == "same" { sub(/^[a-z]+ /, "", r); delete unv[r]; delete dif[r]; next }
+       t == "bad" || t == "unchecked" { sub(/^[a-z]+ /, "", r); fails[r]++; delete unv[r]; next }
+       t == "unverified" { sub(/^unverified /, "", r); fails[r]++; if (!(r in unv)) unv[r] = from[r]; next }
+       t == "differs" { sub(/^differs /, "", r); dif[r] = 1; next }
+       END { for (r in fails) print "fails", fails[r], r
+             for (r in unv) print "unverified", unv[r], r
+             for (r in dif) print "differs", r }' "$pull_tmp.state" "$pull_tmp.todo" "$pull_tmp.lines" > "$pull_tmp.state.new"
+  mv "$pull_tmp.state.new" "$pull_tmp.state"
+}
+
+# What a pass's lines say: the bytes that came onto pull_done, a line for each file that did not come or was not
+# verified (a line of their own for the rest: keep_stale's, stream_verify's). Fails when nothing came at all
+pull_pass_report() {
+  r_moved=0
+  while IFS= read -r r_line; do
+    case "$r_line" in
+      "bytes "*) r_line=${r_line#bytes }; pull_done=$((pull_done + ${r_line% *})); r_moved=${r_line#* } ;;
+      "E "*) echo "${r_line#E }" >&2 ;;
+      "O "*) echo "${r_line#O }" ;;
+    esac
+  done <<EOF
+$(awk 'FILENAME == ARGV[1] { if ($1 == "plan") { r = $0; sub(/^plan [0-9]+ [0-9]+ /, "", r); from[r] = $2 } next }
+       { t = $1; r = $0; sub(/^[a-z]+ /, "", r) }
+       t == "done" { sub(/ [0-9]+ [0-9]+$/, "", r); b += $NF; if ($NF > 0) moved++; next }
+       t == "cut" { sub(/ [0-9]+ [0-9]+$/, "", r); b += $(NF - 1); if ($(NF - 1) > 0) moved++
+                    printf "E %s: interrupted at %.0f of %.0f bytes\n", r, from[r] + $(NF - 1), from[r] + $NF; next }
+       t == "short" { sub(/ [0-9]+ [0-9]+$/, "", r)
+                      print "E " r ": shorter on the phone than listed (changed or gone); listed again"; next }
+       t == "skip" { sub(/ [0-9]+ [0-9]+$/, "", r)
+                     print "E " r ": " $(NF - 1) " bytes here, not the " $NF " planned from; planned again"; next }
+       t == "ok" || t == "same" { moved++; next }
+       t == "unverified" { print "E " r ": its hash from the phone did not come; hashed again"; next }
+       t == "unchecked" { print "E " r ": its hash from the phone did not come; compared again"; next }
+       t == "differs" { print "O " r ": changed in place, fetching it whole"; next }
+       END { printf "bytes %.0f %d\n", b, moved }' "$pull_tmp.todo" "$pull_tmp.lines")
+EOF
+  pull_progress
+  [ "$r_moved" -gt 0 ]
+}
+
+# The end of the passes: the files given up named, and an append-only file whose appended bytes were never verified cut
+# back to its size before them, so that the next run fetches them again. Fails when there was either
+pull_pass_end() {
+  e_rc=0; e_n=0
+  while read -r e_what e_rel; do
+    [ "$e_what" = giveup ] || continue
+    echo "$e_rel: not pulled after $pull_attempts attempts" >&2
+    e_n=$((e_n + 1))
+  done < "$pull_tmp.todo"
+  [ "$e_n" -eq 0 ] || { echo "$e_n file(s) not pulled" >&2; e_rc=1; }
+  while read -r e_what e_from e_rel; do
+    [ "$e_what" = unverified ] || continue
+    e_rc=1
+    if pull_append_only "$e_rel"; then
+      e_copy="$pull_dest/$e_rel"
+      [ "$(stat -c %s "$e_copy" 2>/dev/null || echo 0)" -le "$e_from" ] || truncate -s "$e_from" "$e_copy"
+      echo "$e_rel: what was appended could not be verified, cut back to $e_from bytes for the next run" >&2
+    else
+      echo "$e_rel: its .part could not be verified; the next run hashes it" >&2
+    fi
+  done < "$pull_tmp.state"
+  return "$e_rc"
+}
+
+# The lists go into files: in the same shell, so that a phone found again at another address stays found.
 pull_files() {
   echo "listing the files on the phone"
-  list=$(list_files "$@")
-  if [ -z "$list" ]; then
-    # no list says nothing about the files when the phone has gone
-    if ! phone_wait "$pull_wait_tries"; then
-      echo "the phone went away while listing; run again" >&2
-      return 1
-    fi
-    list=$(list_files "$@")
-  fi
+  if ! pull_list "$@"; then echo "the phone went away while listing; run again" >&2; return 1; fi
   if [ -z "$list" ]; then echo "nothing to pull under $* on the phone" >&2; return 0; fi
-  pull_plan "$list"
+  pull_classify "$list"
+  pull_plan
   if [ "$pull_need" -gt 0 ]; then
     echo "comparing $pull_total files with this machine's copies; about $(pull_bytes "$pull_need") to fetch, in $pull_need_files"
   else echo "comparing $pull_total files with this machine's copies"; fi
-  pull_state=comparing
-  failed=0
-  pull_n=0
-  while read -r pull_size pull_rel <&3; do
-    [ -n "$pull_rel" ] && [ -n "$pull_size" ] || continue
-    pull_wanted "$pull_rel" || continue
-    pull_n=$((pull_n + 1))
-    status "$pull_n of $pull_total: $pull_rel"
-    attempt=1
-    until fetch "$pull_rel" "$pull_size"; do
-      pull_state=waiting
-      status "waiting for the phone, at $pull_rel"
-      if ! phone_wait "$pull_wait_tries"; then
-        echo "the phone went away at $pull_rel; run again to go on (an interrupted append resumes)" >&2
-        return 1
-      fi
-      attempt=$((attempt + 1))
-      if [ "$attempt" -gt "$pull_attempts" ]; then
-        failed=$((failed + 1))
-        break
-      fi
-      pull_state=comparing
-      echo "$pull_rel: the phone answers, going on (attempt $attempt)"
-    done
-  done 3<<EOF
-$list
+  : > "$pull_tmp.state"
+  f_pass=0; f_stuck=0; f_rc=0
+  while :; do
+    f_pass=$((f_pass + 1))
+    pull_state=comparing
+    pull_pass_todo
+    pull_pass_prepare
+    f_plan=$(sed -n 's/^plan //p' "$pull_tmp.todo")
+    f_checks=$(sed -n 's/^check //p' "$pull_tmp.todo")
+    [ -n "$f_plan$f_checks" ] || break
+    read -r f_n f_b f_c <<EOF
+$(awk '$1 == "plan" && $3 > 0 { n++; b += $3; next } $1 == "plan" || $1 == "check" { c++ }
+       END { printf "%d %.0f %d\n", n, b, c }' "$pull_tmp.todo")
 EOF
-  if [ "$failed" -gt 0 ]; then echo "$failed file(s) not pulled" >&2; return 1; fi
+    pull_n=$((pull_total - f_n - f_c))
+    f_say="pass $f_pass: $f_n file(s), $(pull_bytes "$f_b")"
+    [ "$f_c" -eq 0 ] || f_say="$f_say; $f_c compared by hash"
+    echo "$f_say"
+    pull_state=transferring
+    status "$f_say"
+    stream_plan "$f_plan" "$pull_tmp.lines" "$f_checks"
+    f_ok=$?
+    pull_state=comparing
+    if pull_pass_report; then f_stuck=0; else f_stuck=$((f_stuck + 1)); fi
+    pull_pass_state
+    [ "$f_ok" -ne 0 ] || break
+    if [ "$f_stuck" -ge "$pull_attempts" ]; then
+      echo "nothing came in $f_stuck passes; run again" >&2
+      f_rc=1; break
+    fi
+    pull_state=waiting
+    status "waiting for the phone, after pass $f_pass"
+    if ! phone_wait "$pull_wait_tries" || ! pull_list "$@" || [ -z "$list" ]; then
+      echo "the phone went away after pass $f_pass; run again to go on (what came is kept)" >&2
+      f_rc=1; break
+    fi
+    pull_classify "$list"
+  done
+  pull_pass_end || f_rc=1
+  rm -f "$pull_tmp.remote" "$pull_tmp.todo" "$pull_tmp.state" "$pull_tmp.lines"
+  [ "$f_rc" -eq 0 ] || return 1
+  pull_n=$pull_total
   echo "all $pull_total files compared"
 }
 

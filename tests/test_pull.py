@@ -12,7 +12,9 @@ from stub_adb import StubAdb
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REMOTE = "/sdcard/app/files"
 # CUTS names a file holding how many transfers to cut, each at 20000 bytes, after each of which CUT_DOWN shells fail, or
-# with THEN_GONE every call does, through the file GONE. A shell eats its standard input, as the real one does.
+# with THEN_GONE every call does, through the file GONE. HASH_FAILS names a file holding how many hash calls fail.
+# SHRINK: a file cut to SHRINK_TO bytes as the first transfer starts. STREAM_FAIL: every transfer fails at once. A shell
+# eats its standard input, as the real one does.
 BODY = r"""
 [ "$1" = -s ] && shift 2
 how=$1
@@ -31,7 +33,12 @@ case "$how" in
     case "$*" in *"cmd wifi status"*) cat "$PROBE"; exit 0 ;; esac
     cmd=$(printf '%s' "$*" | sed "s#REMOTE#$PHONE#g")
     case "$cmd" in
+      *md5sum*)
+        hf=$(cat "$HASH_FAILS" 2>/dev/null || echo 0)
+        if [ "$hf" -gt 0 ]; then echo $((hf - 1)) > "$HASH_FAILS"; exit 1; fi ;;
       *"tail -c"*)
+        if [ -n "$SHRINK" ] && [ ! -e "$CUTS.shrunk" ]; then : > "$CUTS.shrunk"; truncate -s "$SHRINK_TO" "$PHONE/$SHRINK"; fi
+        [ -z "$STREAM_FAIL" ] || exit 1
         cuts=$(cat "$CUTS" 2>/dev/null || echo 0)
         if [ "$cuts" -gt 0 ]; then
           echo $((cuts - 1)) > "$CUTS"
@@ -89,7 +96,9 @@ class PullCase(unittest.TestCase):
         open(marker, "w").close()
         self.env = self.stub.env()
         self.env.pop("ANDROID_SERIAL", None)
-        self.env.update(PHONE=self.phone, CUTS=self.cuts, DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
+        self.hash_fails = os.path.join(self.top, "hash_fails")
+        self.env.update(PHONE=self.phone, CUTS=self.cuts, HASH_FAILS=self.hash_fails, SHRINK="", SHRINK_TO="0",
+                        STREAM_FAIL="", DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
                         ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2",
                         ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull,
                         ADB_LOOP_ROOT_MOUNT="none", XDG_DATA_HOME=os.path.join(self.top, "xdg"))
@@ -129,7 +138,14 @@ class PullCase(unittest.TestCase):
         return r
 
     def transfers(self):
+        """the calls that carry files (the streams), not their hashes"""
         return [c for c in self.stub.calls() if "tail -c" in c]
+
+    @staticmethod
+    def header(name, size):
+        """the frame's header before a file sent from its start: a plain stream cut at 20000 bytes has 20000 less this of
+        the file"""
+        return len("%d 0 %s\n" % (size, name))
 
 
 class Mirror(PullCase):
@@ -167,7 +183,7 @@ class Mirror(PullCase):
         self.ok()
         self.assertEqual(self.got("Logs/a.csv"), body)
         self.assertEqual(len(self.transfers()), 1)
-        self.assertIn("tail -c +100001", self.transfers()[0])
+        self.assertIn("'100000 200000 Logs/a.csv'", self.transfers()[0])
 
     def test_a_copy_that_is_not_the_files_start_is_kept_as_stale(self):
         body = self.put("Logs/a.csv")
@@ -202,17 +218,18 @@ class Mirror(PullCase):
                 r = self.ok(NOGZIP=nogzip, CUT_DOWN="1")
                 self.assertEqual(self.got("Logs/a%s.csv" % nogzip), body)
                 self.assertIn("interrupted at", r.stderr)
-                self.assertIn("(attempt 2)", r.stdout)
+                self.assertIn("pass 2:", r.stdout)
                 resumed = self.transfers()[calls + 1]
-                self.assertNotIn("tail -c +1 ", resumed)
+                self.assertRegex(resumed, r"'[1-9][0-9]* [0-9]+ Logs/a%s.csv'" % nogzip)
                 self.assertIn("finished", r.stdout)
 
     def test_a_cut_whole_fetch_resumes_its_part(self):
         body = self.put("store.bin", size=300000)
         self.write(self.cuts, 1)
-        r = self.ok(NOGZIP="1")
+        self.ok(NOGZIP="1")
         self.assertEqual(self.got("store.bin"), body)
-        self.assertIn("resuming at 20000 of 300000", r.stdout)
+        got = 20000 - self.header("store.bin", 300000)
+        self.assertIn("'%d %d store.bin'" % (got, 300000 - got), self.transfers()[1])
         self.assertFalse(os.path.exists(os.path.join(self.here, "store.bin.part")))
 
     def test_a_phone_that_does_not_come_back_ends_it_and_the_next_run_goes_on(self):
@@ -220,13 +237,14 @@ class Mirror(PullCase):
         self.write(self.cuts, 1)
         r = self.pull(NOGZIP="1", THEN_GONE="1")
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("the phone went away at Logs/a.csv", r.stderr)
+        self.assertIn("the phone went away after pass 1", r.stderr)
         self.assertNotIn("finished", r.stdout)
-        self.assertEqual(self.got("Logs/a.csv"), body[:20000])
+        got = 20000 - self.header("Logs/a.csv", 300000)
+        self.assertEqual(self.got("Logs/a.csv"), body[:got])
         os.remove(self.gone)
         self.ok(NOGZIP="1")
         self.assertEqual(self.got("Logs/a.csv"), body)
-        self.assertIn("tail -c +20001", self.transfers()[-1])
+        self.assertIn("'%d %d Logs/a.csv'" % (got, 300000 - got), self.transfers()[-1])
 
     def test_a_file_that_keeps_failing_is_given_up_after_its_attempts_and_the_others_still_come(self):
         bad = self.put("Logs/a.csv")
@@ -234,9 +252,12 @@ class Mirror(PullCase):
         self.write(self.cuts, 3)
         r = self.pull(NOGZIP="1")
         self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("Logs/a.csv: not pulled after 3 attempts", r.stderr)
         self.assertIn("1 file(s) not pulled", r.stderr)
         self.assertEqual(self.got("Logs/b.csv"), other)
-        self.assertEqual(self.got("Logs/a.csv"), bad[:60000])
+        got = self.got("Logs/a.csv")
+        self.assertEqual(got, bad[:len(got)])
+        self.assertGreater(len(got), 55000)
 
     def test_no_list_from_a_phone_that_has_gone_is_a_failure_not_nothing_to_pull(self):
         self.put("Logs/a.csv")
@@ -299,6 +320,71 @@ vpnapp:
 """
 
 
+class Passes(PullCase):
+    def hashes(self):
+        return [c for c in self.stub.calls() if "md5sum" in c]
+
+    def test_many_files_in_one_call_a_bucket_and_one_for_the_hashes(self):
+        files = {"Logs/%02d.csv" % i: self.put("Logs/%02d.csv" % i, size=1000 + i) for i in range(30)}
+        files.update({"pics/%02d.jpg" % i: self.put("pics/%02d.jpg" % i, size=500 + i) for i in range(30)})
+        r = self.ok()
+        for n, d in files.items():
+            self.assertEqual(self.got(n), d, n)
+        self.assertEqual((len(self.transfers()), len(self.hashes())), (2, 1))
+        self.assertIn("pass 1: 60 file(s)", r.stdout)
+        self.assertNotIn("pass 2", r.stdout)
+        # the second run: the pictures, not append-only, compared by hash, the logs by size
+        self.ok()
+        self.assertEqual((len(self.transfers()), len(self.hashes())), (2, 2))
+        self.assertIn("pics/00.jpg", self.hashes()[1])
+        self.assertNotIn("Logs/00.csv", self.hashes()[1])
+
+    def test_a_pass_whose_hashes_did_not_come_is_followed_by_one_of_hashes_only(self):
+        body = self.put("Logs/a.csv", size=5000)
+        part = self.put("store.bin", size=5000)
+        self.write(self.hash_fails, 1)
+        r = self.ok()
+        self.assertEqual((self.got("Logs/a.csv"), self.got("store.bin")), (body, part))
+        self.assertIn("its hash from the phone did not come", r.stderr)
+        self.assertIn("pass 2: 0 file(s), 0 kB; 2 compared by hash", r.stdout)
+        self.assertEqual((len(self.transfers()), len(self.hashes())), (1, 2))
+
+    def test_an_append_never_verified_is_cut_back_and_the_next_run_fetches_it_again(self):
+        body = self.put("Logs/a.csv", size=5000)
+        self.have("Logs/a.csv", body[:1000])
+        self.write(self.hash_fails, 3)
+        r = self.pull()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("Logs/a.csv: what was appended could not be verified, cut back to 1000 bytes", r.stderr)
+        self.assertEqual(self.got("Logs/a.csv"), body[:1000])
+        self.ok()
+        self.assertEqual(self.got("Logs/a.csv"), body)
+        self.assertIn("'1000 4000 Logs/a.csv'", self.transfers()[-1])
+
+    def test_a_whole_part_from_an_earlier_run_is_only_hashed(self):
+        body = self.put("store.bin", size=5000)
+        self.have("store.bin.part", body)
+        self.ok()
+        self.assertEqual(self.got("store.bin"), body)
+        self.assertFalse(os.path.exists(os.path.join(self.here, "store.bin.part")))
+        self.assertEqual((len(self.transfers()), len(self.hashes())), (0, 1))
+
+    def test_a_file_shorter_than_listed_is_listed_again(self):
+        self.put("store.bin", size=300000)
+        r = self.ok(SHRINK="store.bin", SHRINK_TO="1000")
+        self.assertIn("store.bin: shorter on the phone than listed", r.stderr)
+        with open(os.path.join(self.phone, "store.bin"), "rb") as f:
+            self.assertEqual(self.got("store.bin"), f.read())
+        self.assertEqual(len(self.got("store.bin")), 1000)
+
+    def test_passes_that_bring_nothing_end_the_pull(self):
+        self.put("Logs/a.csv", size=1000)
+        r = self.pull(STREAM_FAIL="1")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("nothing came in 3 passes", r.stderr)
+        self.assertEqual(len(self.transfers()), 3)
+
+
 class Progress(PullCase):
     def status(self):
         directory = os.path.join(self.top, "status")
@@ -332,7 +418,7 @@ class Progress(PullCase):
         r = self.pull(NOGZIP="1", THEN_GONE="1")
         self.assertEqual(r.returncode, 1, r.stdout)
         st = self.status()
-        self.assertEqual((st["state"], st["bytes_done"]), ("failed", "20000"))
+        self.assertEqual((st["state"], st["bytes_done"]), ("failed", str(20000 - self.header("Logs/a.csv", 300000))))
 
     def test_the_link_in_words_and_what_slows_it(self):
         self.put("Logs/a.csv", size=1000)

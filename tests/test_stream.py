@@ -244,7 +244,7 @@ class Hashes(StreamCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(verdicts, {"Logs/a.csv": "bad"})
         self.assertFalse(self.exists("Logs/a.csv"))
-        self.assertEqual(self.got("Logs/a.csv.stale"), wrong + data[1000:])
+        self.assertEqual(self.got("Logs/a.csv.stale"), wrong)
         r, lines, verdicts = self.run_plan(self.whole("Logs/a.csv"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.got("Logs/a.csv"), data)
