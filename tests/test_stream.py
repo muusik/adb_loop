@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from stub_adb import StubAdb
@@ -13,7 +14,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REMOTE = "/sdcard/app/files"
 # CUT_PLAIN / CUT_PACKED / CUT_HASH: that call (plain, through gzip, the hashes) cut after that many bytes. WAIT_FOR: the
 # plain stream starts only once the gzip one and the hashes have (files they touch), so that a run that makes the calls
-# one after the other fails.
+# one after the other fails. STALL_PLAIN / STALL_HASH: that call sends that many bytes, then nothing, until it is ended.
+# SLOW_PLAIN: the plain call sends its bytes 1000 at a time, every half second.
 BODY = r"""
 [ "$1" = -s ] && shift 2
 shift
@@ -30,7 +32,16 @@ case "$cmd" in
     fi
     cut=${CUT_PLAIN:-} ;;
 esac
+case "$cmd" in *md5sum*) stall=${STALL_HASH:-} ;; *"| gzip"*) stall= ;; *) stall=${STALL_PLAIN:-} ;; esac
 if [ -n "$cut" ]; then sh -c "$cmd" | head -c "$cut"; exit 1; fi
+if [ -n "$stall" ]; then sh -c "$cmd" | head -c "$stall"; exec sleep 300; fi
+case "$cmd" in *md5sum*|*"| gzip"*) ;; *)
+  if [ -n "${SLOW_PLAIN:-}" ]; then
+    sh -c "$cmd" > "$TOP/slow"; n=$(stat -c %s "$TOP/slow"); i=0
+    while [ "$i" -lt "$n" ]; do tail -c +$((i + 1)) "$TOP/slow" | head -c 1000; i=$((i + 1000)); sleep 0.5; done
+    exit 0
+  fi ;;
+esac
 exec sh -c "$cmd"
 """
 RULES = """
@@ -59,7 +70,8 @@ class StreamCase(unittest.TestCase):
                     '. "$adb_loop_path/stream.sh"\n%s%s' % (ROOT, REMOTE, self.here, RULES, MAIN))
         self.env = self.stub.env()
         self.env.update(PHONE=self.phone, TOP=self.top, XDG_DATA_HOME=os.path.join(self.top, "xdg"))
-        for k in ("CUT_PLAIN", "CUT_PACKED", "CUT_HASH", "WAIT_FOR", "STREAM_PLAN_BYTES"):
+        for k in ("CUT_PLAIN", "CUT_PACKED", "CUT_HASH", "WAIT_FOR", "STREAM_PLAN_BYTES", "STALL_PLAIN", "STALL_HASH",
+                  "SLOW_PLAIN", "ADB_LOOP_STALL"):
             self.env.pop(k, None)
 
     def put(self, name, data):
@@ -98,6 +110,7 @@ class StreamCase(unittest.TestCase):
         r = subprocess.run(["sh", self.script], env=e, capture_output=True, timeout=60)
         with open(os.path.join(self.top, "lines")) as f:
             out = f.read().splitlines()
+        self.stalled = [x for x in out if x.startswith("stalled ")]
         stream = [x for x in out if x.split(" ")[0] in ("done", "cut", "short", "skip")]
         verdicts = {x.split(" ", 1)[1]: x.split(" ")[0] for x in out if x.split(" ")[0] in ("ok", "bad", "unverified")}
         return r, stream, verdicts
@@ -374,6 +387,52 @@ class Cut(StreamCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         for n, d in data.items():
             self.assertEqual(self.got(n), d)
+
+
+
+class Watchdog(StreamCase):
+    def files(self):
+        return {"pics/%d.jpg" % i: self.put("pics/%d.jpg" % i, os.urandom(10000)) for i in range(3)}
+
+    def test_a_stalled_call_is_ended_with_an_exact_prefix(self):
+        files = self.files()
+        names = sorted(files)
+        h1 = len("10000 0 %s\n" % names[0])
+        h2 = len("10000 0 %s\n" % names[1])
+        start = time.monotonic()
+        r, lines, verdicts = self.run_plan(self.whole(*names), ADB_LOOP_STALL="2",
+                                           STALL_PLAIN=str(h1 + 10000 + TOKEN + h2 + 4321))
+        self.assertLess(time.monotonic() - start, 20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.stalled, ["stalled plain 2"])
+        self.assertEqual(lines, ["done %s 0 10000" % names[0], "cut %s 4321 10000" % names[1]])
+        self.assertEqual(verdicts, {names[0]: "ok"})
+        self.assertEqual(self.got(names[1] + ".part"), files[names[1]][:4321])
+        r, lines, verdicts = self.run_plan([p for p in self.whole(*names) if p[1] > 0])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n in names:
+            self.assertEqual(self.got(n), files[n])
+
+    def test_a_stalled_hash_call_leaves_the_files_unverified(self):
+        files = self.files()
+        names = sorted(files)
+        start = time.monotonic()
+        r, lines, verdicts = self.run_plan(self.whole(*names), ADB_LOOP_STALL="2", STALL_HASH="0")
+        self.assertLess(time.monotonic() - start, 20)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.stalled, ["stalled hashes 2"])
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(set(verdicts.values()), {"unverified"})
+
+    def test_a_slow_call_that_keeps_coming_is_not_ended(self):
+        files = self.files()
+        names = sorted(files)
+        r, lines, verdicts = self.run_plan(self.whole(*names), ADB_LOOP_STALL="2", SLOW_PLAIN="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.stalled, [])
+        self.assertEqual(set(verdicts.values()), {"ok"})
+        for n in names:
+            self.assertEqual(self.got(n), files[n])
 
 
 if __name__ == "__main__":

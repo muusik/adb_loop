@@ -26,9 +26,17 @@
 #
 # A stream that stops early leaves the file at hand an exact prefix, as pull.sh's transfers do: a plan made again from
 # the sizes here goes on from there.
+#
+# A call has no timeout, since a plan may be any size, but a watchdog: a call that has written nothing here for
+# ADB_LOOP_STALL seconds (60) is ended, with a line "stalled CALL SECONDS", and the pass ends with what came. What it
+# watches is the file being written (a bucket's target, the hash call's lines) and its size, every second; a stretch
+# with no output longer than that on the phone's side (md5sum over a single file of several GB) would be cut short too.
 
 stream_end="-- end"
 stream_plan_bytes=${STREAM_PLAN_BYTES:-100000}
+stream_stall=${ADB_LOOP_STALL:-60}
+# the file that names what a bucket's demuxer is writing, for the watchdog (set by stream_bucket)
+stream_at=
 
 # where rel's bytes are appended: the copy for an append-only file, else its .part. A project may redefine it
 stream_target() {
@@ -69,7 +77,10 @@ stream_demux_files() {
     [ "${d_out%/*}" = "$d_dir" ] || { d_dir=${d_out%/*}; mkdir -p "$d_dir"; }
     d_have=$(stat -c %s "$d_out" 2>/dev/null || echo 0)
     if [ "$d_have" -ne "$d_from" ]; then
-      head -c "$d_len" > /dev/null
+      # read and dropped: into a file of its own when watched, so that a long one is seen to come
+      d_skip=/dev/null
+      [ -z "$stream_at" ] || { d_skip=$stream_at.skip; printf '%s\n' "$d_skip" > "$stream_at"; }
+      head -c "$d_len" > "$d_skip"
       if IFS= read -r h && [ "$h" = "-- $1" ]; then
         printf 'skip %s %s %s\n' "$d_rel" "$d_have" "$d_from" >&4
         continue
@@ -77,6 +88,7 @@ stream_demux_files() {
       printf 'short %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
       return 1
     fi
+    [ -z "$stream_at" ] || printf '%s\n' "$d_out" > "$stream_at"
     head -c "$d_len" >> "$d_out"
     d_got=$(($(stat -c %s "$d_out") - d_have))
     if [ "$d_got" -ne "$d_len" ] || ! IFS= read -r h; then
@@ -101,22 +113,57 @@ stream_demux_files() {
   return 1
 }
 
+# The phone's command $1 into the FIFO $2, by adb in the background, with a watchdog over the file that $3 names: a call
+# whose file has kept its name and size for stream_stall seconds is ended, with a line "stalled $4 SECONDS" into $5.
+# stream_call_end ends both once the reader is done
+stream_call() {
+  adb exec-out "$1" > "$2" &
+  c_adb=$!
+  stream_watch "$c_adb" "$3" "$4" "$5" &
+  c_watch=$!
+}
+stream_call_end() {
+  kill "$c_adb" "$c_watch" 2>/dev/null
+  wait "$c_adb" 2>/dev/null
+  wait "$c_watch" 2>/dev/null
+}
+stream_watch() {
+  w_last=; w_still=0
+  while sleep 1; do
+    kill -0 "$1" 2>/dev/null || return 0
+    w_at=; read -r w_at < "$2" 2>/dev/null
+    w_now="$(stat -c %s "$w_at" 2>/dev/null) $w_at"
+    if [ "$w_now" != "$w_last" ]; then w_last=$w_now; w_still=0; continue; fi
+    w_still=$((w_still + 1))
+    [ "$w_still" -ge "$stream_stall" ] || continue
+    printf 'stalled %s %s\n' "$3" "$w_still" >> "$4"
+    kill "$1" 2>/dev/null
+    return 0
+  done
+}
+
 # one bucket's plan ($1) in calls of up to stream_plan_bytes each, through $2 on the phone and $3 here; the lines into
-# $4. Stops at the first call that does not reach its end
+# $4, the call named $5 in them. Stops at the first call that does not reach its end
 stream_bucket() {
   [ -n "$1" ] || return 0
   b_tmp=$(mktemp -d) || return 1
   printf '%s\n' "$1" > "$b_tmp/plan"
   # whole lines, each piece at most stream_plan_bytes (a longer line alone)
   split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
+  mkfifo "$b_tmp/fifo" || { rm -rf "$b_tmp"; return 1; }
+  stream_at=$b_tmp/at
   b_rc=0
   for b_piece in "$b_tmp"/piece.*; do
     b_token=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-    # shellcheck disable=SC2086  # the commands, with their options
-    adb exec-out "$(stream_command "$(cat "$b_piece")" "$2" "$b_token")" | $3 2>/dev/null | stream_demux "$b_token" 4>> "$4"
+    : > "$stream_at"
+    stream_call "$(stream_command "$(cat "$b_piece")" "$2" "$b_token")" "$b_tmp/fifo" "$stream_at" "$5" "$4"
+    # shellcheck disable=SC2086  # the command, with its options
+    $3 < "$b_tmp/fifo" 2>/dev/null | stream_demux "$b_token" 4>> "$4"
     b_rc=$?
+    stream_call_end
     [ "$b_rc" -eq 0 ] || break
   done
+  stream_at=
   rm -rf "$b_tmp"
   return "$b_rc"
 }
@@ -153,28 +200,36 @@ EOF
 
 # the hash stream on the standard input, as "phone md5 rel" lines; a range's after its whole file's, which it replaces
 stream_hash_lines() {
-  p_ranges=
+  p_ranges=; p_cr=$(printf '\r')
   while IFS= read -r p_h; do
+    p_h=${p_h%"$p_cr"}
     if [ -z "$p_ranges" ]; then
       if [ "$p_h" = "-- ranges" ]; then p_ranges=yes; continue; fi
       printf 'phone %s %s\n' "${p_h%% *}" "${p_h#*  }"
     else
       IFS= read -r p_m || break
+      p_m=${p_m%"$p_cr"}
       printf 'phone %s %s\n' "${p_m%% *}" "$p_h"
     fi
   done
 }
 
-# the hashes of a plan ($1), in calls of up to stream_plan_bytes each, into $2
+# the hashes of a plan ($1), in calls of up to stream_plan_bytes each, into $2. Each call's lines go into a file of their
+# own first, for the watchdog, since the other calls write to $2 as well
 stream_hashes() {
   [ -n "$1" ] || return 0
   b_tmp=$(mktemp -d) || return 1
   printf '%s\n' "$1" > "$b_tmp/plan"
   split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
+  mkfifo "$b_tmp/fifo" || { rm -rf "$b_tmp"; return 1; }
+  printf '%s\n' "$b_tmp/lines" > "$b_tmp/at"
   b_rc=0
   for b_piece in "$b_tmp"/piece.*; do
-    adb exec-out "$(stream_hash_command "$(cat "$b_piece")")" | tr -d '\r' | stream_hash_lines >> "$2"
+    stream_call "$(stream_hash_command "$(cat "$b_piece")")" "$b_tmp/fifo" "$b_tmp/at" hashes "$2"
+    stream_hash_lines < "$b_tmp/fifo" > "$b_tmp/lines"
     b_rc=$?
+    stream_call_end
+    cat "$b_tmp/lines" >> "$2"
     [ "$b_rc" -eq 0 ] || break
   done
   rm -rf "$b_tmp"
@@ -256,9 +311,9 @@ EOF
   s_hash=$1
   [ -z "${3:-}" ] || s_hash="$s_hash$s_nl$(printf '%s\n' "$3" | sed '/./s/^/0 /')"
   : > "$2"
-  stream_bucket "$s_plain" cat cat "$2" &
+  stream_bucket "$s_plain" cat cat "$2" plain &
   s_plain_pid=$!
-  stream_bucket "$s_packed" "$zip" "$unzip" "$2" &
+  stream_bucket "$s_packed" "$zip" "$unzip" "$2" gzip &
   s_packed_pid=$!
   stream_hashes "$s_hash" "$2" &
   s_hash_pid=$!

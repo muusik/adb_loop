@@ -536,6 +536,7 @@ $(awk 'FILENAME == ARGV[1] { if ($1 == "plan") { r = $0; sub(/^plan [0-9]+ [0-9]
        t == "skip" { sub(/ [0-9]+ [0-9]+$/, "", r)
                      print "E " r ": " $(NF - 1) " bytes here, not the " $NF " planned from; planned again"; next }
        t == "ok" || t == "same" { moved++; next }
+       t == "stalled" { print "E nothing came on the " $2 " call for " $3 " s; it was ended"; next }
        t == "unverified" { print "E " r ": its hash from the phone did not come; hashed again"; next }
        t == "unchecked" { print "E " r ": its hash from the phone did not come; compared again"; next }
        t == "differs" { print "O " r ": changed in place, fetching it whole"; next }

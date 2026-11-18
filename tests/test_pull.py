@@ -13,7 +13,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 REMOTE = "/sdcard/app/files"
 # CUTS names a file holding how many transfers to cut, each at 20000 bytes, after each of which CUT_DOWN shells fail, or
 # with THEN_GONE every call does, through the file GONE. HASH_FAILS names a file holding how many hash calls fail.
-# SHRINK: a file cut to SHRINK_TO bytes as the first transfer starts. STREAM_FAIL: every transfer fails at once. A shell
+# SHRINK: a file cut to SHRINK_TO bytes as the first transfer starts. STREAM_FAIL: every transfer fails at once. STALL:
+# the first transfer sends 20000 bytes, then nothing until it is ended. A shell
 # eats its standard input, as the real one does.
 BODY = r"""
 [ "$1" = -s ] && shift 2
@@ -39,6 +40,7 @@ case "$how" in
       *"tail -c"*)
         if [ -n "$SHRINK" ] && [ ! -e "$CUTS.shrunk" ]; then : > "$CUTS.shrunk"; truncate -s "$SHRINK_TO" "$PHONE/$SHRINK"; fi
         [ -z "$STREAM_FAIL" ] || exit 1
+        if [ -n "$STALL" ] && [ ! -e "$CUTS.stalled" ]; then : > "$CUTS.stalled"; sh -c "$cmd" | head -c 20000; exec sleep 300; fi
         cuts=$(cat "$CUTS" 2>/dev/null || echo 0)
         if [ "$cuts" -gt 0 ]; then
           echo $((cuts - 1)) > "$CUTS"
@@ -98,7 +100,7 @@ class PullCase(unittest.TestCase):
         self.env.pop("ANDROID_SERIAL", None)
         self.hash_fails = os.path.join(self.top, "hash_fails")
         self.env.update(PHONE=self.phone, CUTS=self.cuts, HASH_FAILS=self.hash_fails, SHRINK="", SHRINK_TO="0",
-                        STREAM_FAIL="", DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
+                        STREAM_FAIL="", STALL="", DOWN=self.down, GONE=self.gone, KEEP="1", WANT="",
                         ADB_LOOP_CONTAINER_MARKERS=marker, ADB_LOOP_WAIT_TRIES="2",
                         ADB_LOOP_STATUS_DIR=os.path.join(self.top, "status"), PROBE=os.devnull,
                         ADB_LOOP_ROOT_MOUNT="none", XDG_DATA_HOME=os.path.join(self.top, "xdg"))
@@ -383,6 +385,15 @@ class Passes(PullCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("nothing came in 3 passes", r.stderr)
         self.assertEqual(len(self.transfers()), 3)
+
+    def test_a_stalled_call_is_ended_and_the_next_pass_goes_on(self):
+        body = self.put("store.bin", size=300000)
+        start = time.monotonic()
+        r = self.ok(STALL="1", ADB_LOOP_STALL="2")
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertRegex(r.stderr, r"nothing came on the (plain|gzip) call for 2 s; it was ended")
+        self.assertEqual(self.got("store.bin"), body)
+        self.assertEqual(len(self.transfers()), 2)
 
 
 class Progress(PullCase):
