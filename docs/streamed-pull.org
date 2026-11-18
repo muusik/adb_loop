@@ -189,13 +189,33 @@ it left alone (fetched over as before, kept as =.stale=), a seed that was not th
 102.9 MB in one pass (2 min 2 s, 864 kB/s on 2.4 GHz at -81 dBm), the status file's bytes, rate,
 time left and file moving every 2 s through it, every JPEG the phone's =md5sum=.
 
-** TODO Step 6: On the phone, in the projects
+** DONE Step 6: On the phone, in the projects
 
 Each of the four projects' =loop/pull.sh= on the new =pull_all=, first with =keep= (no prune):
 sign_reader (thousands of JPEGs, append-only rules), android_imu (a few large logs, one growing),
 bsfc_mapper (its own =pull_dest=), squiggle_snap. Compared with the copies from the old path: no
 file differs, no =.stale= appears that the old path would not have made. The submodule's new commit
 recorded in each.
+
+Done 2026-11-18: the four record c38c682 (sign_reader a80083c, android_imu 69b42b9, bsfc_mapper
+801bf7e, squiggle_snap 5708082). Only bsfc_mapper's =loop/pull.sh= changed: =samples_*.bin.v*=
+append-only, its =pull_fetch_first= rewritten as a =pull_seed= (the rename loop with its =phone_md5=
+check, without the stream), and =partial= as =pull_all Logs profile.json= instead of a =fetch= of
+the profile first. The others used nothing of the per-file path.
+
+Each pulled with =keep= into its own data directory, the old path's copies, with a snapshot of it
+before: squiggle_snap 14 files and android_imu 1, nothing to fetch; sign_reader 537.8 MB in 210
+files in one pass (2 min 49 s, the screen off for the first part), bsfc_mapper 159.0 MB in 25 in 44
+s and a second pass for =usbclk.want= (the same size, another md5: fetched whole, as the old path
+would). No file here shrank, no =.stale= or =.part= was added, and every file new or changed (210
+and 26, the script's own logcat files aside) is the phone's by its =md5sum=. One JPEG that the old
+path had caught while the camera was writing it got only its tail.
+
+Found on the way: GNU gzip's =gzip -dc= here reads 256 KB of its input before it decodes any, so in
+the gzip bucket the demuxer sees nothing until then. The live progress moves in steps of that size,
+and the watchdog would end a gzip call slower than about 4 kB/s (256 KB in its 60 s); at the link's
+speeds (0.2 MB/s over the VPN and up) neither shows. bsfc_mapper's terminal test sends its slow
+stream plain for that reason, as this repo's does.
 
 ** TODO Step 7: README
 
