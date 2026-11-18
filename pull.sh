@@ -56,8 +56,18 @@ pull_append_only() { return 1; }
 pull_same_size_is_same() { pull_append_only "$1"; }
 # $2 is its size: of a kind that may go from the phone once it is old and held here. Default: nothing may
 pull_prunable_kind() { return 1; }
-# already compressed, so its bytes go plain, not through the phone's gzip. Default: .gz, .xz, .zst, .bz2, .zip
-pull_compressed() { case "$1" in *.gz|*.xz|*.zst|*.bz2|*.zip) return 0 ;; *) return 1 ;; esac; }
+# already compressed, so its bytes go plain, not through the phone's gzip. Default: archives (.gz .xz .zst .bz2 .zip .7z
+# .apk) and media: pictures (.jpg .jpeg .png .webp .heic .avif), video (.mp4 .webm .mkv .3gp), sound (.m4a .aac .mp3
+# .ogg .opus .amr), in either case
+pull_compressed() {
+  case "$1" in
+    *.[gG][zZ]|*.[xX][zZ]|*.[zZ][sS][tT]|*.[bB][zZ]2|*.[zZ][iI][pP]|*.7[zZ]|*.[aA][pP][kK]) return 0 ;;
+    *.[jJ][pP][gG]|*.[jJ][pP][eE][gG]|*.[pP][nN][gG]|*.[wW][eE][bB][pP]|*.[hH][eE][iI][cC]|*.[aA][vV][iI][fF]) return 0 ;;
+    *.[mM][pP]4|*.[wW][eE][bB][mM]|*.[mM][kK][vV]|*.3[gG][pP]) return 0 ;;
+    *.[mM]4[aA]|*.[aA][aA][cC]|*.[mM][pP]3|*.[oO][gG][gG]|*.[oO][pP][uU][sS]|*.[aA][mM][rR]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # to be pulled at all. Default: everything
 pull_wanted() { return 0; }
 # the phone's command that lists what may be pruned, given the find arguments in $1 that select and print the old files.

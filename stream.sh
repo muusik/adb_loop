@@ -1,0 +1,238 @@
+# shellcheck shell=sh
+# shellcheck disable=SC2154  # pull_dest, pull_remote, zip, unzip: set by pull.sh and the project
+# stream.sh (prototype, not used by pull.sh yet): many files' bytes in one adb call, framed so that this side can split
+# them again. Sourced after pull.sh, whose pull_remote, pull_dest, rules (pull_compressed, pull_append_only) and gzip
+# (pull_ask_gzip) it uses.
+#
+# A plan is lines "from len rel": the phone's bytes [from, from + len) of rel, below pull_remote. The phone sends, for
+# each line, a header "len from rel", then the bytes, then a line "-- TOKEN", the token new for each call; after the last
+# file a line "-- end". The demuxer reads a header with read (byte by byte from a pipe) and the bytes with head -c, which
+# reads no further than it needs, so the token's line is where the shell's read starts. A file that has become shorter
+# than the plan says (or gone) sends fewer bytes: the token is not where it should be, the file is cut back to the size
+# it had before and the call ends; a plan made again from the listing goes on. Padding instead would keep the stream
+# going, but costs the phone two more processes a file, at about 11 ms each on a Z2 Force (2026-11-18).
+#
+# The files that pull_compressed names go in one stream, plain; the rest in another, through the phone's gzip; both at
+# once. A plan longer than STREAM_PLAN_BYTES (the command that carries it goes over adb) is sent in several calls, one
+# after another, in each stream.
+#
+# A third call, at the same time, carries only hashes: for each line of the plan, the md5 of the phone's bytes [0, from +
+# len), what the file here will be once it came. The whole files' in one md5sum, an append-only file's through head -c.
+# Here each file is hashed as soon as its bytes are in, in the background, while the next ones come. Once the calls
+# end, a file whose hashes agree is taken (a .part goes over its copy); one whose do not is dropped (a .part) or kept
+# aside as .stale (an append-only copy, then not the start of the phone's file), and fetched again; one whose phone hash
+# did not come stays as it is, for a hash in the next pass.
+#
+# A stream that stops early leaves the file at hand an exact prefix, as pull.sh's transfers do: a plan made again from
+# the sizes here goes on from there.
+
+stream_end="-- end"
+stream_plan_bytes=${STREAM_PLAN_BYTES:-100000}
+
+# where rel's bytes are appended: the copy for an append-only file, else its .part. A project may redefine it
+stream_target() {
+  if pull_append_only "$1"; then printf '%s\n' "$pull_dest/$1"; else printf '%s\n' "$pull_dest/$1.part"; fi
+}
+
+# the phone's command that sends a plan ($1) through a compressor ($2), with the token $3 after each file. A file from
+# its start is one process (head), a tail two
+stream_command() {
+  # shellcheck disable=SC2016  # expanded on the phone
+  printf '%s' "cd '$pull_remote' && { for e in"
+  printf '%s\n' "$1" | while read -r f l r; do [ -n "$r" ] && printf " '%s %s %s'" "$f" "$l" "$r"; done
+  # shellcheck disable=SC2016  # expanded on the phone
+  printf '%s\n' '; do f=${e%% *}; e=${e#* }; l=${e%% *}; r=${e#* }; echo "$l $f $r";'\
+' if [ "$f" -eq 0 ]; then head -c $l "$r"; else tail -c +$((f + 1)) "$r" | head -c $l; fi 2>/dev/null;'\
+" echo '-- $3'; done; echo '$stream_end'; } | $2"
+}
+
+# A stream on the standard input, split into its files, the token $1 after each. On fd 4, a line for each: "done rel
+# from len" when all its bytes came (and, once hashed, "here md5 rel"), "cut rel got len" when the stream stopped in it, "skip rel have from" when the copy
+# was not the size the plan started from (its bytes are read and dropped), "short rel from len" when the token was not
+# after its bytes (the file is cut back to from). Returns 0 when the end came, 1 when the stream stopped early or a file
+# was short, 2 when a header was not one. Returns once the hashes are written.
+stream_demux() {
+  stream_demux_files "$@"
+  d_rc=$?
+  wait
+  return "$d_rc"
+}
+
+stream_demux_files() {
+  d_dir=
+  while IFS= read -r h; do
+    [ "$h" != "$stream_end" ] || return 0
+    d_len=${h%% *}; h=${h#* }; d_from=${h%% *}; d_rel=${h#* }
+    case "$d_len$d_from" in ''|*[!0-9]*) echo "stream: not a header: $d_len $d_from $d_rel" >&2; return 2 ;; esac
+    d_out=$(stream_target "$d_rel")
+    [ "${d_out%/*}" = "$d_dir" ] || { d_dir=${d_out%/*}; mkdir -p "$d_dir"; }
+    d_have=$(stat -c %s "$d_out" 2>/dev/null || echo 0)
+    if [ "$d_have" -ne "$d_from" ]; then
+      head -c "$d_len" > /dev/null
+      if IFS= read -r h && [ "$h" = "-- $1" ]; then
+        printf 'skip %s %s %s\n' "$d_rel" "$d_have" "$d_from" >&4
+        continue
+      fi
+      printf 'short %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
+      return 1
+    fi
+    head -c "$d_len" >> "$d_out"
+    d_got=$(($(stat -c %s "$d_out") - d_have))
+    if [ "$d_got" -ne "$d_len" ] || ! IFS= read -r h; then
+      # the stream ended in the file or right after it. A short file's bytes run on into its token (and on, to the
+      # end): when the token is in what came, the file is put back; when not, all that came is the file's
+      if tail -c "$d_got" "$d_out" | grep -aqF -- "-- $1"; then
+        truncate -s "$d_have" "$d_out"
+        printf 'short %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
+      else
+        printf 'cut %s %s %s\n' "$d_rel" "$d_got" "$d_len" >&4
+      fi
+      return 1
+    fi
+    if [ "$h" != "-- $1" ]; then
+      truncate -s "$d_have" "$d_out"
+      printf 'short %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
+      return 1
+    fi
+    printf 'done %s %s %s\n' "$d_rel" "$d_from" "$d_len" >&4
+    { d_md5=$(md5sum < "$d_out"); printf 'here %s %s\n' "${d_md5%% *}" "$d_rel" >&4; } &
+  done
+  return 1
+}
+
+# one bucket's plan ($1) in calls of up to stream_plan_bytes each, through $2 on the phone and $3 here; the lines into
+# $4. Stops at the first call that does not reach its end
+stream_bucket() {
+  [ -n "$1" ] || return 0
+  b_tmp=$(mktemp -d) || return 1
+  printf '%s\n' "$1" > "$b_tmp/plan"
+  # whole lines, each piece at most stream_plan_bytes (a longer line alone)
+  split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
+  b_rc=0
+  for b_piece in "$b_tmp"/piece.*; do
+    b_token=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+    # shellcheck disable=SC2086  # the commands, with their options
+    adb exec-out "$(stream_command "$(cat "$b_piece")" "$2" "$b_token")" | $3 2>/dev/null | stream_demux "$b_token" 4>> "$4"
+    b_rc=$?
+    [ "$b_rc" -eq 0 ] || break
+  done
+  rm -rf "$b_tmp"
+  return "$b_rc"
+}
+
+# The phone's command that hashes, for each line of a plan ($1), its bytes [0, from + len). All of them in one md5sum,
+# "md5  rel" lines. An append-only file may be growing, so its size is taken just before and just after: when both are
+# the plan's end, md5sum read just that; else, after "-- ranges", its name and "md5  -" of its first bytes, which a
+# reader takes over the whole file's. The sizes are matched by name, so a file gone is one that gets its range hashed.
+# A file's range alone costs the phone two processes, about 21 ms (Z2 Force, 2026-11-18): 3.3 s for 152 small files,
+# where the one md5sum took 0.14 s.
+stream_hash_command() {
+  h_all=; h_grow=; h_ranges=
+  while read -r h_f h_l h_r; do
+    [ -n "$h_r" ] || continue
+    h_all="$h_all '$h_r'"
+    if pull_append_only "$h_r"; then h_grow="$h_grow '$h_r'"; h_ranges="$h_ranges '$((h_f + h_l)) $h_r'"; fi
+  done <<EOF
+$1
+EOF
+  printf '%s' "cd '$pull_remote' && {"
+  [ -z "$h_grow" ] || printf '%s' " b=\$(stat -c '%s %n'$h_grow 2>/dev/null);"
+  [ -z "$h_all" ] || printf '%s' " md5sum$h_all 2>/dev/null;"
+  [ -z "$h_grow" ] || printf '%s' " a=\$(stat -c '%s %n'$h_grow 2>/dev/null);"
+  printf '%s' " echo '-- ranges';"
+  # each line of b and a, in the order of the plan, taken off the front when it is the file's; a missing file's not
+  # there, so the next one's stays
+  # shellcheck disable=SC2016  # expanded on the phone
+  [ -z "$h_ranges" ] || printf '%s' ' n=$(echo; echo .); n=${n%.}; b="$b$n"; a="$a$n"; for e in'"$h_ranges"'; do l=${e%% *}; r=${e#* }; sb=; sa=;'\
+' x=${b%%"$n"*}; if [ "${x#* }" = "$r" ]; then sb=${x%% *}; b=${b#*"$n"}; fi;'\
+' x=${a%%"$n"*}; if [ "${x#* }" = "$r" ]; then sa=${x%% *}; a=${a#*"$n"}; fi;'\
+' if [ "$sb" != "$l" ] || [ "$sa" != "$l" ]; then echo "$r"; head -c $l "$r" 2>/dev/null | md5sum; fi; done;'
+  printf '%s\n' " }"
+}
+
+# the hash stream on the standard input, as "phone md5 rel" lines; a range's after its whole file's, which it replaces
+stream_hash_lines() {
+  p_ranges=
+  while IFS= read -r p_h; do
+    if [ -z "$p_ranges" ]; then
+      if [ "$p_h" = "-- ranges" ]; then p_ranges=yes; continue; fi
+      printf 'phone %s %s\n' "${p_h%% *}" "${p_h#*  }"
+    else
+      IFS= read -r p_m || break
+      printf 'phone %s %s\n' "${p_m%% *}" "$p_h"
+    fi
+  done
+}
+
+# the hashes of a plan ($1), in calls of up to stream_plan_bytes each, into $2
+stream_hashes() {
+  [ -n "$1" ] || return 0
+  b_tmp=$(mktemp -d) || return 1
+  printf '%s\n' "$1" > "$b_tmp/plan"
+  split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
+  b_rc=0
+  for b_piece in "$b_tmp"/piece.*; do
+    adb exec-out "$(stream_hash_command "$(cat "$b_piece")")" | tr -d '\r' | stream_hash_lines >> "$2"
+    b_rc=$?
+    [ "$b_rc" -eq 0 ] || break
+  done
+  rm -rf "$b_tmp"
+  return "$b_rc"
+}
+
+# The files done in a pass, by the lines in $1 (a later hash of a file over an earlier): taken, dropped or kept aside, each with a line into $1: "ok rel", "bad
+# rel" or "unverified rel". Fails when any was not ok.
+stream_verify() {
+  awk '{ t = $1; r = $0
+         if (t == "done") { sub(/^done /, "", r); sub(/ [0-9]+ [0-9]+$/, "", r); done[r] = 1; order[++n] = r }
+         else if (t == "here" || t == "phone") { sub(/^[a-z]+ [^ ]* /, "", r); h[t, r] = $2 } }
+       END { for (i = 1; i <= n; i++) { r = order[i]
+               if ((("here", r) in h) && (("phone", r) in h)) print (h["here", r] == h["phone", r] ? "ok" : "bad"), r
+               else print "unverified", r } }' "$1" > "$1.verdicts"
+  v_rc=0
+  while read -r v_what v_rel; do
+    v_out=$(stream_target "$v_rel")
+    case "$v_what" in
+      ok) [ "$v_out" = "$pull_dest/$v_rel" ] || mv "$v_out" "$pull_dest/$v_rel" ;;
+      bad)
+        v_rc=1
+        if [ "$v_out" = "$pull_dest/$v_rel" ]; then
+          keep_stale "$v_rel" "$v_out" "not the phone's bytes once appended to"
+        else
+          rm -f "$v_out"
+          echo "$v_rel: not the phone's bytes (changed while it was fetched?); fetched again in the next pass" >&2
+        fi ;;
+      *) v_rc=1 ;;
+    esac
+    printf '%s %s\n' "$v_what" "$v_rel" >> "$1"
+  done < "$1.verdicts"
+  rm -f "$1.verdicts"
+  return "$v_rc"
+}
+
+# A plan ($1) in three calls at once: the files that pull_compressed names, plain; the rest through the phone's gzip;
+# the hashes of all. The lines into the file $2, made new. Fails when a call stopped early or a file was not verified.
+stream_plan() {
+  s_plain=; s_packed=
+  s_nl='
+'
+  while read -r s_f s_l s_r; do
+    [ -n "$s_r" ] || continue
+    if pull_compressed "$s_r"; then s_plain="$s_plain$s_f $s_l $s_r$s_nl"
+    else s_packed="$s_packed$s_f $s_l $s_r$s_nl"; fi
+  done <<EOF
+$1
+EOF
+  : > "$2"
+  stream_bucket "$s_plain" cat cat "$2" &
+  s_plain_pid=$!
+  stream_bucket "$s_packed" "$zip" "$unzip" "$2" &
+  s_packed_pid=$!
+  stream_hashes "$1" "$2" &
+  s_hash_pid=$!
+  wait "$s_plain_pid"; s_rc1=$?
+  wait "$s_packed_pid"; s_rc2=$?
+  wait "$s_hash_pid"; s_rc3=$?
+  stream_verify "$2"; s_rc4=$?
+  [ "$s_rc1" -eq 0 ] && [ "$s_rc2" -eq 0 ] && [ "$s_rc3" -eq 0 ] && [ "$s_rc4" -eq 0 ]
+}
