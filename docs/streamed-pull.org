@@ -1,0 +1,127 @@
+#+TITLE: A pull in a few streams
+#+DATE: 2026-11-18
+
+=pull.sh= fetches the phone's files one =adb exec-out= at a time, with md5 round trips before and
+after: each file costs a shell started on the phone over the link, which for many small files is
+most of the time a pull takes. =stream.sh= sends a whole plan of files in one call per bucket
+(already compressed files plain, the rest through the phone's gzip), with a third call at the same
+time carrying the phone's hashes, while keeping what =pull.sh='s transfers promise: whatever a
+dropped link leaves is an exact prefix, and the next run goes on from it. Proposed and prototyped in
+chat on 2026-11-18. =stream.sh= is sourced beside =pull.sh= but nothing calls it yet: =pull_all= is
+unchanged until /Step 6/.
+
+* Current (2026-11-18, stream.sh as a prototype)
+
+A plan is lines =from len rel=: the phone's bytes [from, from + len) of a file below =pull_remote=.
+=stream_plan= splits it by =pull_compressed= into a plain bucket and a gzip bucket and makes three
+calls at once: the two buckets and the hashes. A plan longer than =STREAM_PLAN_BYTES= (100 kB; the
+command carries it over adb) goes in several calls one after another in each.
+
+** Framing
+
+For each file the phone sends a header =len from rel=, the bytes, then a line =-- TOKEN=, the token
+new for each call; after the last file =-- end=. Here =read= takes the header (byte by byte from a
+pipe) and =head -c= the bytes; GNU =head -c= reads no further than it needs from a pipe, so the
+shell's next =read= starts at the token. A file from its start is one process on the phone (=head=),
+a tail two (=tail | head=). A file that has become shorter than the plan says, or is gone, sends
+fewer bytes: its token is not where it should be, the file is cut back to its size before the call
+and the call ends. When a stream ends early, the token is looked for in the bytes just appended:
+there, the file was short and is cut back; not there, all that came is the file's, an exact prefix.
+
+Zero padding of a short file would keep a stream going, but cost five processes a file on the phone
+instead of one; at about 11 ms a process on the Z2 Force that made the stream barely faster than one
+call a file.
+
+** Hashes
+
+One call hashes, for each line of the plan, the phone's bytes [0, from + len), what the file here
+will be: all the files in one =md5sum=. An append-only file may be growing, so its size is taken by
+=stat= just before and just after; when both are the plan's end, =md5sum= read just that, else its
+first bytes are hashed by themselves (=head -c | md5sum=) and that hash replaces the whole file's.
+Hashing every append-only file's range took 3.3 s for 152 small files, the one =md5sum= 0.14 s.
+
+Here each file is hashed in the background as soon as its bytes are in. Once the calls end,
+=stream_verify= joins the two: hashes that agree take the file (a =.part= goes over its copy);
+hashes that differ drop a =.part= or keep an append-only copy aside as =.stale= (=keep_stale=), to
+be fetched again; a file whose phone hash did not come stays unverified. An append is therefore
+optimistic: the copy here is no longer checked to be the start of the phone's file before its tail
+is fetched, only after, which costs the tail's bytes in the rare case that it was not.
+
+The lines of a call go into one file: =done=, =cut=, =short=, =skip= from the streams, =here= and
+=phone= hashes, and the verdicts =ok=, =bad=, =unverified=.
+
+** Measured (2026-11-18, sign_reader's files, Z2 Force on 5 GHz Wi-Fi)
+
+| What                                   | One call a file | Streamed |
+|----------------------------------------+-----------------+----------|
+| 152 small files (=.tsv=, 2.2 MB)       | 8.1 s           | 3.1 s    |
+| the same and 8 JPEGs, 22 MB            |                 | 3.4 s    |
+| hashes of the 160 (alone, in parallel) |                 | 0.3 s    |
+
+The 160 files matched the phone's own =md5sum=. The 3.4 s is about 6.5 MB/s, near what that link
+carries; the 152 small files' 3.1 s is mostly the phone's =head= and the local hashing, about 20 ms
+a file.
+
+* Plan
+
+** DONE Step 1: Framing and buckets
+
+Library. =stream_command=, =stream_demux=, =stream_bucket=, =stream_plan=; the default
+=pull_compressed= names media (pictures, video, sound) and =.7z=, =.apk= as well. Tests over the
+stub adb: contents and names that look like framing, both buckets at once, a plan in pieces, a
+stream cut in a file, in a header, between the bytes and the token, and through gzip; a file shrunk
+or gone.
+
+Done 2026-11-18 (fc35522).
+
+** DONE Step 2: The hash call and the verdicts
+
+Library. =stream_hash_command=, =stream_hash_lines=, =stream_hashes=, =stream_verify=; the local
+hash in the demuxer's background. Tests: a growing file hashed as far as the plan, an append to a
+copy that was not the start kept aside, a =.part= that was not dropped, hashes cut short, which
+files get their range hashed.
+
+Done 2026-11-18 (fc35522).
+
+** TODO Step 3: Passes in pull_all
+
+Library. =pull_files= makes a plan from the listing and the copies here and runs =stream_plan= on
+it, then plans again from what that left, until nothing is left or the attempts are spent: a file
+=cut= or =short= continues from its size, one =bad= is fetched whole, one =unverified= gets only a
+hash line. A same-size file under 1 MB that =pull_same_size_is_same= does not cover is in the hash
+call only, and fetched in the next pass when its hashes differ; a same-size file of 1 MB or more is
+skipped, as now. Between passes, =phone_wait= as now; =pull_attempts= counted per file across
+passes. The per-file path stays in =pull.sh= for /Step 5/, and =phone_md5= for =prune_phone='s
+=held=.
+
+Check: =tests/test_pull.py= passes over the new =pull_files= (its cuts are per call, so some will
+need the stream's terms), and its /Flat/ and /App/ shapes give the same files as before.
+
+** TODO Step 4: A watchdog for a stalled call
+
+Library. =stream.sh= has no timeout: the per-file one in =pull.sh= is sized to a file. A call whose
+output has not grown for =ADB_LOOP_STALL= seconds (60) is ended, so the pass ends with a prefix and
+=phone_wait= takes over. The monitor already measures =stalled_s=; the watchdog reads the target
+being written, as the monitor does.
+
+** TODO Step 5: Progress and pull_fetch_first
+
+Library. The demuxer reports the file at hand and the bytes done to =pull_progress= (=pull_out=,
+=pull_from=, =pull_done=), from two streams at once: the status line shows both files or the larger.
+Files that a project's =pull_fetch_first= claims go the per-file way after the streamed passes;
+which projects define it is to be looked at first: not sign_reader; the hook came over with
+bsfc_mapper's pull (2616cad), so that one probably does, and android_imu and squiggle_snap were not
+here to look at on 2026-11-18.
+
+** TODO Step 6: On the phone, in the projects
+
+Each of the four projects' =loop/pull.sh= on the new =pull_all=, first with =keep= (no prune):
+sign_reader (thousands of JPEGs, append-only rules), android_imu (a few large logs, one growing),
+bsfc_mapper (its own =pull_dest=), squiggle_snap. Compared with the copies from the old path: no
+file differs, no =.stale= appears that the old path would not have made. The submodule's new commit
+recorded in each.
+
+** TODO Step 7: README
+
+=stream.sh= in the README's list and =pull.sh='s header comment rewritten for the streamed pull;
+this file's /Current/ updated and the plan closed.
