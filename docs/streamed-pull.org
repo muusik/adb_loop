@@ -18,6 +18,10 @@ A plan is lines =from len rel=: the phone's bytes [from, from + len) of a file b
 calls at once: the two buckets and the hashes. A plan longer than =STREAM_PLAN_BYTES= (100 kB; the
 command carries it over adb) goes in several calls one after another in each.
 
+All four projects pull this way since /Step 6/ (sign_reader, android_imu, bsfc_mapper and
+squiggle_snap on c38c682); none of them has a per-file path left. The README lists =stream.sh=, and
+=pull.sh='s header comment describes the passes.
+
 ** Framing
 
 For each file the phone sends a header =len from rel=, the bytes, then a line =-- TOKEN=, the token
@@ -86,6 +90,12 @@ While the calls run, the monitor reads the pass's lines (the bytes of each file 
 buckets' files at hand, which the demuxer names in =at/plain= and =at/gzip= with the size the target
 had and the bytes to come, emptied once a file is done so that its bytes are not counted twice; the
 status line names the one with the most still to come, with the files done of all.
+
+A limit, found in /Step 6/: GNU gzip's =gzip -dc= here (1.13) reads 256 KB of its input before it
+decodes any, so the demuxer of the gzip bucket sees nothing until then. Its live progress moves in
+steps of that size, and the watchdog would end a gzip call slower than about 4 kB/s (256 KB in its
+60 s). At the link's speeds, 0.2 MB/s over the VPN and up, neither shows; a test with a slow stream
+sends it plain.
 
 ** Measured (2026-11-18, sign_reader's files, Z2 Force on 5 GHz Wi-Fi)
 
@@ -217,7 +227,13 @@ and the watchdog would end a gzip call slower than about 4 kB/s (256 KB in its 6
 speeds (0.2 MB/s over the VPN and up) neither shows. bsfc_mapper's terminal test sends its slow
 stream plain for that reason, as this repo's does.
 
-** TODO Step 7: README
+** DONE Step 7: README
 
 =stream.sh= in the README's list and =pull.sh='s header comment rewritten for the streamed pull;
 this file's /Current/ updated and the plan closed.
+
+Done 2026-11-18 (ccbffd6): the README lists =stream.sh= and no longer has the plan as under way;
+=pull.sh='s header describes the listing, the plan from the sizes here, the calls with the hashes
+alongside, the =.stale= rules, =pull_seed=, the retries across passes and the watchdog, where it
+described an md5 round trip before and after each file. /Current/ names the four projects and the
+gzip limit under /Passes/. The plan is closed.
