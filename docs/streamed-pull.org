@@ -68,6 +68,12 @@ in a row that bring nothing end the pull. An append whose hash never came is cut
 the size it had before, so that the next run fetches it again; an unverified =.part= stays, and the
 next run hashes it.
 
+A call has no timeout but a watchdog: once the file it is writing (a bucket's target, named by the
+demuxer as each file starts; the hash call's own lines) has kept its name and size for
+=ADB_LOOP_STALL= seconds (60), its adb is ended and the pass ends with what came, a line
+=stalled CALL SECONDS= among its lines. Each call's adb therefore runs in the background into a
+FIFO, so that its pid is known. The phone's side of an ended call runs until its next write fails.
+
 ** Measured (2026-11-18, sign_reader's files, Z2 Force on 5 GHz Wi-Fi)
 
 | What                                   | One call a file | Streamed |
@@ -125,12 +131,23 @@ that bring nothing. On the phone: sign_reader's 151 =.tsv= files into a scratch 
 (1 min 42 s on a weak signal, -81 dBm), a second run fetching nothing, every file the phone's
 =md5sum=.
 
-** TODO Step 4: A watchdog for a stalled call
+** DONE Step 4: A watchdog for a stalled call
 
 Library. =stream.sh= has no timeout: the per-file one in =pull.sh= is sized to a file. A call whose
 output has not grown for =ADB_LOOP_STALL= seconds (60) is ended, so the pass ends with a prefix and
 =phone_wait= takes over. The monitor already measures =stalled_s=; the watchdog reads the target
 being written, as the monitor does.
+
+Done 2026-11-18 (bdf989a). Not as planned: the watched file is named by the demuxer as it goes, the
+monitor's =pull_out= being the main shell's; the hash call's lines go into a file of their own
+first, and the =tr -d '\r'= before them is gone (=exec-out= adds none; a =\r= is still taken off). A
+skipped file's bytes go into a scratch file instead of =/dev/null=, so that a long skip is seen to
+come. New tests: =tests/test_stream.py= (/Watchdog/: a stalled bucket ended with an exact prefix, a
+stalled hash call leaving the files unverified, a slow call that keeps coming not ended) and
+=tests/test_pull.py= (/Passes/: a stalled call followed by a pass that finishes); with the
+watchdog's =kill= taken out, the first of them fails. On the phone: sign_reader's 151 =.tsv= files
+fetched fresh in one pass (4 s, the phone's =md5sum= for each), and a call of =sleep 40= on the
+phone ended here after 4 s with =ADB_LOOP_STALL= 3.
 
 ** TODO Step 5: Progress and pull_fetch_first
 
