@@ -335,6 +335,14 @@ class Mirror(PullCase):
         # every call of the pull and the prune, as the phone gets it: under adbd's 64 kB
         self.assertLess(max(len(c) for c in self.stub.calls()), 64000)
 
+    def test_the_prune_hashes_in_calls_of_up_to_prune_hash_bytes_of_files(self):
+        for i in range(6):
+            self.put("Logs/old%d.csv" % i, size=200000, days=30)
+        self.ok()
+        r = self.ok(KEEP="", PRUNE_HASH_BYTES="450000")
+        self.assertIn("pruned 6 files", r.stdout)
+        self.assertEqual(len([c for c in self.prune_calls() if "md5sum" in c]), 3)
+
     def test_the_prune_splits_its_calls_by_stream_plan_bytes(self):
         for i in range(40):
             self.put("Logs/old%02d.csv" % i, size=200000 + i, days=30)

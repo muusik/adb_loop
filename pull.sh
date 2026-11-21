@@ -45,6 +45,8 @@
 keep_days=${KEEP_DAYS:-7}
 # shellcheck disable=SC2034  # for a project's pull_prunable_kind
 min_kb=${PRUNE_MIN_KB:-100}
+# the prune's hash calls, in bytes of the files they hash
+prune_hash_bytes=${PRUNE_HASH_BYTES:-67108864}
 pull_wait_tries=${ADB_LOOP_WAIT_TRIES:-15}
 pull_attempts=3
 zip="cat"; unzip="cat"
@@ -598,9 +600,9 @@ EOF
 # --- the prune
 
 # pull_held_also: more of the message, where else the files are held
-# Three kinds of call however many files: the listing, the phone's hashes of the candidates (stream_hashes, in calls of
-# up to STREAM_PLAN_BYTES of names) and the deletions (as many). One round trip a file each for its hash and its rm took
-# about a second a file over Wi-Fi, minutes for a few hundred of sign_reader's frames.
+# One listing, then the phone's hashes of the candidates (stream_hashes) in calls of up to PRUNE_HASH_BYTES of files
+# (64 MB) and a quarter of STREAM_PLAN_BYTES of names, then the deletions in calls of up to STREAM_PLAN_BYTES of names.
+# One round trip a file each for its hash and its rm took about a second a file over Wi-Fi.
 prune_phone() {
   pull_resolve_dest
   echo "looking for files on the phone older than $keep_days days"
@@ -625,7 +627,13 @@ EOF
   if [ -s "$p_tmp/plan" ]; then
     echo "comparing $(wc -l < "$p_tmp/plan") of them with the copies here"
     : > "$p_tmp/phone"
-    stream_hashes "$(cat "$p_tmp/plan")" "$p_tmp/phone"
+    # in groups of up to prune_hash_bytes of files: md5sum's lines come only as its output fills a buffer, and a phone
+    # asleep hashed 51 frames (120 MB) in over the watchdog's 60 s, so the call ended with no hashes (2026-11-21)
+    awk -v max="$prune_hash_bytes" -v out="$p_tmp/group." '{ if (n && sum + $2 > max) { g++; sum = 0; n = 0 }
+      sum += $2; n++; print > (out sprintf("%04d", g)) }' "$p_tmp/plan"
+    for p_group in "$p_tmp"/group.*; do
+      stream_hashes "$(cat "$p_group")" "$p_tmp/phone"
+    done
     p_got=$(grep -c '^phone ' "$p_tmp/phone")
     [ "$p_got" -ge "$(wc -l < "$p_tmp/plan")" ] ||
       echo "the phone's hashes came for $p_got of them; the rest stay on the phone" >&2
