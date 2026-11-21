@@ -13,8 +13,8 @@
 # going, but costs the phone two more processes a file, at about 11 ms each on a Z2 Force (2026-11-18).
 #
 # The files that pull_compressed names go in one stream, plain; the rest in another, through the phone's gzip; both at
-# once. A plan longer than STREAM_PLAN_BYTES (the command that carries it goes over adb) is sent in several calls, one
-# after another, in each stream.
+# once. A plan longer than STREAM_PLAN_BYTES (50 kB; the command that carries it goes over adb) is sent in several
+# calls, one after another, in each stream.
 #
 # A third call, at the same time, carries only hashes: for each line of the plan, the md5 of the phone's bytes [0, from +
 # len), what the file here will be once it came. The whole files' in one md5sum, an append-only file's through head -c.
@@ -33,7 +33,9 @@
 # with no output longer than that on the phone's side (md5sum over a single file of several GB) would be cut short too.
 
 stream_end="-- end"
-stream_plan_bytes=${STREAM_PLAN_BYTES:-100000}
+# adbd closes a call whose command is over 64 kB ("error: closed": 65 279 bytes went, 65 284 did not; Z2 Force,
+# 2026-11-21), so a bucket's command, about 1.1 times its plan, stays under it with room
+stream_plan_bytes=${STREAM_PLAN_BYTES:-50000}
 stream_stall=${ADB_LOOP_STALL:-60}
 # the file in which a bucket's demuxer names what it is writing, for the watchdog and pull.sh's monitor: the path, then
 # "have len", the size it had and the bytes to come; empty between files (set by stream_bucket)
@@ -222,8 +224,8 @@ stream_hash_lines() {
 }
 
 # the hashes of a plan ($1), in calls of up to a quarter of stream_plan_bytes each, into $2: the command names an
-# append-only file four times (md5sum, two stats, its range), about 3.4 times the plan's bytes, and Linux takes no
-# argument over 128 kB (adb: "Argument list too long", and no hashes at all; 2026-11-21, 1537 old frames). Each call's
+# append-only file four times (md5sum, two stats, its range), about 3.4 times the plan's bytes, and a call's command
+# must stay under adbd's 64 kB (above; 1537 old frames in 100 kB pieces got no hashes at all, 2026-11-21). Each call's
 # lines go into a file of their own first, for the watchdog, since the other calls write to $2 as well
 stream_hashes() {
   [ -n "$1" ] || return 0

@@ -15,8 +15,10 @@ since /Step 5/ with no per-file way left; the projects take it up with their sub
 
 A plan is lines =from len rel=: the phone's bytes [from, from + len) of a file below =pull_remote=.
 =stream_plan= splits it by =pull_compressed= into a plain bucket and a gzip bucket and makes three
-calls at once: the two buckets and the hashes. A plan longer than =STREAM_PLAN_BYTES= (100 kB; the
-command carries it over adb) goes in several calls one after another in each.
+calls at once: the two buckets and the hashes. A plan longer than =STREAM_PLAN_BYTES= (50 kB; the
+command carries it over adb) goes in several calls one after another in each, the hashes' in pieces
+of a quarter of it: the phone's adbd closes a call whose command is over 64 kB ("error: closed",
+measured 2026-11-21 on the Z2 Force), and the hash command names an append-only file four times.
 
 All four projects pull this way since /Step 6/ (sign_reader, android_imu, bsfc_mapper and
 squiggle_snap on c38c682); none of them has a per-file path left. The README lists =stream.sh=, and

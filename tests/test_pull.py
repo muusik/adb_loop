@@ -322,8 +322,8 @@ class Mirror(PullCase):
         self.assertEqual(len([c for c in calls if "rm --" in c]), 1)
 
     def test_the_prune_of_more_append_only_names_than_one_argument_holds(self):
-        # 1200 long names: a 100 kB piece of the plan made a hash command of about 400 kB, over Linux's 128 kB for one
-        # argument, and no file was pruned (2026-11-21)
+        # 1200 long names: a 100 kB piece of the plan made a hash command of about 400 kB, which adb refused, and
+        # commands over 64 kB the phone's adbd closes; no file was pruned (2026-11-21)
         long = "x" * 80
         for i in range(1200):
             self.put("Logs/%s%04d.csv" % (long, i), size=10, days=30)
@@ -332,7 +332,8 @@ class Mirror(PullCase):
         self.assertIn("pruned 1200 files", r.stdout)
         self.assertNotIn("Argument list too long", r.stderr)
         self.assertEqual(os.listdir(os.path.join(self.phone, "Logs")), [])
-        self.assertLess(max(len(c) for c in self.prune_calls()), 131072)
+        # every call of the pull and the prune, as the phone gets it: under adbd's 64 kB
+        self.assertLess(max(len(c) for c in self.stub.calls()), 64000)
 
     def test_the_prune_splits_its_calls_by_stream_plan_bytes(self):
         for i in range(40):
