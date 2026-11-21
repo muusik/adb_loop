@@ -306,6 +306,32 @@ class Mirror(PullCase):
         self.assertIn("kept on the phone: Logs/old.csv", r.stderr)
         self.assertIn("pruned 0 files", r.stdout)
 
+    def prune_calls(self):
+        calls = self.stub.calls()
+        return calls[next(i for i, c in enumerate(calls) if "-mtime" in c):]
+
+    def test_the_prune_hashes_and_deletes_many_files_in_one_call_each(self):
+        for i in range(40):
+            self.put("Logs/old %02d.csv" % i, size=200000 + i, days=30)
+        self.ok()
+        r = self.ok(KEEP="")
+        self.assertEqual(os.listdir(os.path.join(self.phone, "Logs")), [])
+        self.assertIn("pruned 40 files", r.stdout)
+        calls = self.prune_calls()
+        self.assertEqual(len([c for c in calls if "md5sum" in c]), 1)
+        self.assertEqual(len([c for c in calls if "rm --" in c]), 1)
+
+    def test_the_prune_splits_its_calls_by_stream_plan_bytes(self):
+        for i in range(40):
+            self.put("Logs/old%02d.csv" % i, size=200000 + i, days=30)
+        self.ok()
+        r = self.ok(KEEP="", STREAM_PLAN_BYTES="200")
+        self.assertEqual(os.listdir(os.path.join(self.phone, "Logs")), [])
+        self.assertIn("pruned 40 files", r.stdout)
+        calls = self.prune_calls()
+        self.assertGreater(len([c for c in calls if "md5sum" in c]), 1)
+        self.assertGreater(len([c for c in calls if "rm --" in c]), 1)
+
 
 # what the phone's link probe answered on a Moto Z2 (2026-11-12), and the same phone on a weak 2.4 GHz access point
 WIFI5_SCREEN_OFF = """WifiInfo: SSID: "home", BSSID: e4:8d:8c:69:33:0c, MAC: 6e:c3:c2:02:1e:d3, IP: /192.168.1.196, \

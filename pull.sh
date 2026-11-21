@@ -597,30 +597,61 @@ EOF
 
 # --- the prune
 
-# whether this machine holds a byte-for-byte copy of it
-held() {
-  rel=$1; size=$2
-  copy="$pull_dest/$rel"
-  [ -f "$copy" ] && [ "$(stat -c %s "$copy")" -eq "$size" ] && [ "$(local_md5 "$copy")" = "$(phone_md5 "$rel")" ]
-}
-
 # pull_held_also: more of the message, where else the files are held
+# Three kinds of call however many files: the listing, the phone's hashes of the candidates (stream_hashes, in calls of
+# up to STREAM_PLAN_BYTES of names) and the deletions (as many). One round trip a file each for its hash and its rm took
+# about a second a file over Wi-Fi, minutes for a few hundred of sign_reader's frames.
 prune_phone() {
   pull_resolve_dest
   echo "looking for files on the phone older than $keep_days days"
   old=$(timeout 60 adb exec-out "cd '$pull_remote' 2>/dev/null && { $(pull_prune_find "-type f -mtime +$keep_days -exec stat -c '%s %n' {} +"); } 2>/dev/null" |
         tr -d '\r' | sed 's| \./| |')
-  count=0; bytes=0
+  p_tmp=$(mktemp -d) || return 1
+  # the candidates: of a prunable kind, with a copy here of the phone's size, as a plan "0 size rel" for the hashes
+  : > "$p_tmp/plan"
   while read -r pull_size pull_rel <&3; do
     [ -n "$pull_rel" ] && [ -n "$pull_size" ] || continue
     pull_prunable_kind "$pull_rel" "$pull_size" || continue
-    if held "$pull_rel" "$pull_size"; then
-      timeout 20 adb shell rm "'$pull_remote/$pull_rel'" < /dev/null && count=$((count + 1)) && bytes=$((bytes + pull_size)) && echo "pruned from the phone: $pull_rel ($pull_size bytes)"
+    copy="$pull_dest/$pull_rel"
+    if [ -f "$copy" ] && [ "$(stat -c %s "$copy")" -eq "$pull_size" ]; then
+      printf '0 %s %s\n' "$pull_size" "$pull_rel" >> "$p_tmp/plan"
     else
       echo "kept on the phone: $pull_rel (the copy here is missing or differs: move it aside and pull again)" >&2
     fi
   done 3<<EOF
 $old
 EOF
+  count=0; bytes=0
+  if [ -s "$p_tmp/plan" ]; then
+    echo "comparing $(wc -l < "$p_tmp/plan") of them with the copies here"
+    : > "$p_tmp/phone"
+    stream_hashes "$(cat "$p_tmp/plan")" "$p_tmp/phone"
+    # here: "md5  rel" for each candidate, by one md5sum over all of them
+    cut -d' ' -f3- "$p_tmp/plan" | (cd "$pull_dest" && tr '\n' '\0' | xargs -0 md5sum --) > "$p_tmp/here" 2>/dev/null
+    # held: the candidates whose two hashes agree, as "size rel"; the rest said as kept
+    awk 'FILENAME == ARGV[1] { if ($1 == "phone") { m = $2; sub(/^phone [^ ]* /, ""); ph[$0] = m }; next }
+         FILENAME == ARGV[2] { m = $1; sub(/^[^ ]*  /, ""); hh[$0] = m; next }
+         { s = $2; sub(/^0 [^ ]* /, ""); if (($0 in ph) && ($0 in hh) && ph[$0] == hh[$0]) print s, $0
+           else print $0 > "/dev/stderr" }' "$p_tmp/phone" "$p_tmp/here" "$p_tmp/plan" > "$p_tmp/held" 2> "$p_tmp/kept"
+    while IFS= read -r pull_rel; do
+      echo "kept on the phone: $pull_rel (the copy here is missing or differs: move it aside and pull again)" >&2
+    done < "$p_tmp/kept"
+    # the deletions, in calls of up to STREAM_PLAN_BYTES of names; the phone says each file it removed
+    cut -d' ' -f2- "$p_tmp/held" | split -C "$stream_plan_bytes" - "$p_tmp/rm."
+    : > "$p_tmp/gone"
+    for p_piece in "$p_tmp"/rm.*; do
+      [ -f "$p_piece" ] || continue
+      # shellcheck disable=SC2016  # expanded on the phone
+      timeout 120 adb exec-out "cd '$pull_remote' && for p in$(while IFS= read -r r; do printf " '%s'" "$r"; done < "$p_piece");"' do rm -- "$p" && echo "$p"; done' < /dev/null |
+        tr -d '\r' >> "$p_tmp/gone"
+    done
+    # the files removed, with their sizes from the held list
+    awk 'FILENAME == ARGV[1] { gone[$0] = 1; next } { s = $1; sub(/^[^ ]* /, ""); if ($0 in gone) print s, $0 }' \
+      "$p_tmp/gone" "$p_tmp/held" > "$p_tmp/done"
+    while read -r pull_size pull_rel; do
+      count=$((count + 1)); bytes=$((bytes + pull_size)); echo "pruned from the phone: $pull_rel ($pull_size bytes)"
+    done < "$p_tmp/done"
+  fi
+  rm -rf "$p_tmp"
   echo "pruned $count files, $((bytes / 1048576)) MB, older than $keep_days days (KEEP_DAYS) and held here${pull_held_also:-}"
 }
