@@ -221,13 +221,15 @@ stream_hash_lines() {
   done
 }
 
-# the hashes of a plan ($1), in calls of up to stream_plan_bytes each, into $2. Each call's lines go into a file of their
-# own first, for the watchdog, since the other calls write to $2 as well
+# the hashes of a plan ($1), in calls of up to a quarter of stream_plan_bytes each, into $2: the command names an
+# append-only file four times (md5sum, two stats, its range), about 3.4 times the plan's bytes, and Linux takes no
+# argument over 128 kB (adb: "Argument list too long", and no hashes at all; 2026-11-21, 1537 old frames). Each call's
+# lines go into a file of their own first, for the watchdog, since the other calls write to $2 as well
 stream_hashes() {
   [ -n "$1" ] || return 0
   b_tmp=$(mktemp -d) || return 1
   printf '%s\n' "$1" > "$b_tmp/plan"
-  split -C "$stream_plan_bytes" "$b_tmp/plan" "$b_tmp/piece."
+  split -C "$((stream_plan_bytes / 4))" "$b_tmp/plan" "$b_tmp/piece."
   mkfifo "$b_tmp/fifo" || { rm -rf "$b_tmp"; return 1; }
   printf '%s\n' "$b_tmp/lines" > "$b_tmp/at"
   b_rc=0

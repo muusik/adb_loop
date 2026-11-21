@@ -626,6 +626,9 @@ EOF
     echo "comparing $(wc -l < "$p_tmp/plan") of them with the copies here"
     : > "$p_tmp/phone"
     stream_hashes "$(cat "$p_tmp/plan")" "$p_tmp/phone"
+    p_got=$(grep -c '^phone ' "$p_tmp/phone")
+    [ "$p_got" -ge "$(wc -l < "$p_tmp/plan")" ] ||
+      echo "the phone's hashes came for $p_got of them; the rest stay on the phone" >&2
     # here: "md5  rel" for each candidate, by one md5sum over all of them
     cut -d' ' -f3- "$p_tmp/plan" | (cd "$pull_dest" && tr '\n' '\0' | xargs -0 md5sum --) > "$p_tmp/here" 2>/dev/null
     # held: the candidates whose two hashes agree, as "size rel"; the rest said as kept
