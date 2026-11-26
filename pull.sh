@@ -27,6 +27,9 @@
 # when the screen is locked or unlocked, if Developer options' "Default USB configuration" is anything but "No data
 # transfer". A phone that does not come back ends the pull with exit 1; the next run goes on.
 #
+# A copy here may be a symlink (the data directory a git-annex repository, its files locked): it is read through, as the
+# file it leads to, and one that leads nowhere is left alone, neither fetched nor pruned.
+#
 # prune_phone removes files not modified for KEEP_DAYS days (default 7) of the kinds pull_prunable_kind names, each only
 # once the copy here is byte for byte the phone's (size and md5).
 #
@@ -136,6 +139,10 @@ keep_stale() {
   mv "$copy" "$stale"
 }
 
+# the copies here as "size rel" lines. A symlink counts as the file it leads to (a git-annex repository's locked files):
+# one that leads nowhere is no copy, and pull_classify leaves its file alone
+local_files() { find -L "$pull_dest" -type f -printf '%s %P\n' 2>/dev/null; }
+
 # every file under the given directories (relative, "." for all), as "size path" lines
 list_files() {
   timeout 60 adb exec-out "cd '$pull_remote' 2>/dev/null && find $* -type f -exec stat -c '%s %n' {} + 2>/dev/null" | tr -d '\r' | sed 's| \./| |'
@@ -145,7 +152,7 @@ list_files() {
 # pull_total wanted. A same-size file counts as nothing, an append-only copy that turns out not to be the start as its
 # tail: an estimate
 pull_plan() {
-  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  local_files > "$pull_tmp.local"
   # shellcheck disable=SC2046  # three numbers
   set -- $(awk 'FILENAME == ARGV[1] { p = $0; sub(/^[0-9]+ /, "", p); have[p] = $1 + 0; next }
     NF >= 4 { p = $0; sub(/^[0-9]+ [01] [01] /, "", p); s = $1 + 0; h = (p in have) ? have[p] : 0; n++
@@ -389,6 +396,9 @@ pull_list() {
 pull_classify() {
   printf '%s\n' "$1" | while read -r c_s c_r; do
     [ -n "$c_r" ] && pull_wanted "$c_r" || continue
+    # a symlink that leads nowhere: the content is on another machine, not missing (a git-annex repository's file not
+    # fetched here); fetching it would write through the link
+    [ -L "$pull_dest/$c_r" ] && [ ! -e "$pull_dest/$c_r" ] && continue
     c_a=0; pull_append_only "$c_r" && c_a=1
     c_m=0; pull_same_size_is_same "$c_r" && c_m=1
     printf '%s %s %s %s\n' "$c_s" "$c_a" "$c_m" "$c_r"
@@ -397,7 +407,7 @@ pull_classify() {
 
 # the files on the phone ($pull_tmp.remote) with neither a copy nor a .part here, each offered to pull_seed
 pull_pass_seed() {
-  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  local_files > "$pull_tmp.local"
   awk 'FILENAME == ARGV[1] { p = $0; sub(/^[0-9]+ /, "", p); loc[p] = 1; next }
        { r = $0; sub(/^[0-9]+ [01] [01] /, "", r); if (!(r in loc) && !((r ".part") in loc)) print $1, r }' \
     "$pull_tmp.local" "$pull_tmp.remote" > "$pull_tmp.new"
@@ -417,7 +427,7 @@ pull_pass_seed() {
 # hashed). A same-size copy is left alone when pull_same_size_is_same, or when it is 1 MB or more; else checked, and
 # fetched whole once it differs.
 pull_pass_todo() {
-  find "$pull_dest" -type f -printf '%s %P\n' > "$pull_tmp.local" 2>/dev/null
+  local_files > "$pull_tmp.local"
   awk -v max="$pull_attempts" '
     FILENAME == ARGV[1] { r = $0
       if ($1 == "fails") { sub(/^fails [0-9]+ /, "", r); fails[r] = $2 }
@@ -529,7 +539,7 @@ pull_pass_end() {
     e_rc=1
     if pull_append_only "$e_rel"; then
       e_copy="$pull_dest/$e_rel"
-      [ "$(stat -c %s "$e_copy" 2>/dev/null || echo 0)" -le "$e_from" ] || truncate -s "$e_from" "$e_copy"
+      [ "$(stat -L -c %s "$e_copy" 2>/dev/null || echo 0)" -le "$e_from" ] || truncate -s "$e_from" "$e_copy"
       echo "$e_rel: what was appended could not be verified, cut back to $e_from bytes for the next run" >&2
     else
       echo "$e_rel: its .part could not be verified; the next run hashes it" >&2
@@ -615,7 +625,7 @@ prune_phone() {
     [ -n "$pull_rel" ] && [ -n "$pull_size" ] || continue
     pull_prunable_kind "$pull_rel" "$pull_size" || continue
     copy="$pull_dest/$pull_rel"
-    if [ -f "$copy" ] && [ "$(stat -c %s "$copy")" -eq "$pull_size" ]; then
+    if [ -f "$copy" ] && [ "$(stat -L -c %s "$copy")" -eq "$pull_size" ]; then
       printf '0 %s %s\n' "$pull_size" "$pull_rel" >> "$p_tmp/plan"
     else
       echo "kept on the phone: $pull_rel (the copy here is missing or differs: move it aside and pull again)" >&2

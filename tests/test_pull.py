@@ -306,6 +306,43 @@ class Mirror(PullCase):
         self.assertIn("kept on the phone: Logs/old.csv", r.stderr)
         self.assertIn("pruned 0 files", r.stdout)
 
+    def link(self, name, data=None):
+        """the copy of name here as a symlink, as git-annex's locked files are: to a file holding data, or to nothing"""
+        path = os.path.join(self.here, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        target = os.path.join(self.top, "objects", name.replace("/", "_"))
+        if data is not None:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+        os.symlink(target, path)
+        return path
+
+    def test_a_copy_that_is_a_symlink_is_read_through_and_not_fetched_again(self):
+        body = self.put("Logs/a.csv")
+        path = self.link("Logs/a.csv", body)
+        r = self.ok()
+        self.assertEqual(self.transfers(), [])
+        self.assertTrue(os.path.islink(path))
+        self.assertIn("all 1 files compared", r.stdout)
+
+    def test_a_copy_that_is_a_symlink_is_pruned_when_it_holds_the_phones_bytes(self):
+        body = self.put("Logs/old.csv", days=30)
+        self.link("Logs/old.csv", body)
+        r = self.ok(KEEP="")
+        self.assertFalse(os.path.exists(os.path.join(self.phone, "Logs", "old.csv")))
+        self.assertIn("pruned 1 files", r.stdout)
+
+    def test_a_symlink_that_leads_nowhere_is_neither_fetched_nor_pruned(self):
+        self.put("Logs/old.csv", days=30)
+        path = self.link("Logs/old.csv")
+        r = self.ok(KEEP="")
+        self.assertEqual(self.transfers(), [])
+        self.assertTrue(os.path.islink(path))
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.exists(os.path.join(self.phone, "Logs", "old.csv")))
+        self.assertIn("pruned 0 files", r.stdout)
+
     def prune_calls(self):
         calls = self.stub.calls()
         return calls[next(i for i, c in enumerate(calls) if "-mtime" in c):]

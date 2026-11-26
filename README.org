@@ -13,8 +13,9 @@ sign_reader and squiggle_snap. So far:
   link that dropped.
 - =pull.sh= :: a directory of an app's mirrored here as deltas, in passes: each transfer resumes, a
   dropped link is waited for and gone on from, and old files held here byte for byte can be pruned
-  from the phone. While it runs it shows the whole pull's progress and time left, and the link
-  (below).
+  from the phone. A copy here may be a symlink, as a git-annex repository's locked files are: it is
+  read through, and one that leads nowhere (the content on another machine) is neither fetched nor
+  pruned. While it runs it shows the whole pull's progress and time left, and the link (below).
 - =stream.sh= :: a pass's files in a few adb calls at once instead of one a file, for =pull.sh=: the
   already compressed files plain, the rest through the phone's gzip, framed so that a dropped link
   leaves an exact prefix, and a third call with the phone's hashes, which each file here is checked
