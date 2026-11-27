@@ -1,0 +1,59 @@
+#+TITLE: The scripts a project keeps in loop/
+#+DATE: 2026-11-27
+
+What every project on adb_loop calls its loop scripts, the words they take and what their exit codes
+mean, so that a habit from one project works in the next. The library gives the mechanism
+(=where.sh=, =phone.sh=, =pull.sh=, =install.sh=); the scripts are each project's, and so are the
+words only one of them needs. The reasoning is in /Four sets of words/ below.
+
+* Current (2026-11-27; android_imu, bsfc_mapper, sign_reader and squiggle_snap on it)
+
+- =loop/build.sh [PART ...]= :: builds and tests, and never installs. The parts are the project's
+  own (=core=, =asan=, =review=, =android=, =all=; bsfc_mapper's =release|debug= and =x64=); without
+  one it builds them all (bsfc_mapper: Release). =runs_in container=; the output in =logs/build.log=
+  too. Exits with the first failing step's status.
+- =loop/install.sh [nobuild] [older] [reinstall]= :: builds the app (=loop/build.sh android=, or the
+  project's equivalent) and installs it with =install_apk=: fast deploy, the label in
+  =/data/local/tmp/<app>_installed= and the main checkout's =logs/installed.tsv=, the order check
+  against the checkout's branches (=adb_loop_label_file= and =adb_loop_repo= set), the app started
+  again if it was running. =nobuild= installs the APK already built; =older= sets
+  =adb_loop_install_older=; =reinstall= pulls the app's files (=loop/pull.sh=), uninstalls and
+  installs, for a copy signed by another key, where the project allows an uninstall at all
+  (bsfc_mapper does not: it would delete the sample store). =runs_in container=.
+- =loop/pull.sh [keep] [NAME ...]= :: the app's files into the data directory
+  (/docs/data-dirs.org/), pruned from the phone once held unless =keep=; NAMEs, or parts of names,
+  for only those (and no prune). bsfc_mapper's takes =partial= in place of names.
+  =runs_in adb_client=.
+- The exit codes of =install.sh= :: 0 installed; 1 a failed build or install, or a phone that does
+  not answer; 2 a wrong word (the usage line); 3 the phone's copy is signed by another key; 4 the
+  app is busy and an install would cut it off (bsfc_mapper's session; =force= there); 5 the phone's
+  build has work this one lacks that a branch holds (=older=). =install_apk= returns 4 for the last,
+  so each =install.sh= says 5 for it. A project's own outcome beyond these takes 6 and up
+  (bsfc_mapper's 6: built, left to the laptop).
+- The phone :: each project's own variable, =<PROJECT>_PHONE= (=BSFC_PHONE=, =IMU_PHONE=,
+  =SIGNS_PHONE=, =SQUIGGLE_PHONE=), read into =adb_loop_address=; a host:port is connected to first,
+  an adb serial such as =emulator-5554= is used as it is. android_imu still reads =IMU_DEVICE=, its
+  older name.
+- A project's own words :: beside these, never in place of them: bsfc_mapper's =install.sh= has
+  =release|debug=, =force=, =laptop= and =notify=, and its =laptop_install.sh= installs a build from
+  the desktop on the laptop.
+
+
+* Four sets of words (2026-11-27)
+
+The pulls already agreed, having moved here together (=pull.sh=). The builds and installs had not:
+android_imu and squiggle_snap built and installed with =loop/build.sh [parts] install= (android_imu
+also =reinstall=), sign_reader with =loop/install.sh [nobuild] [older]= and no build script, and
+bsfc_mapper with =loop/build.sh=, which installed unless told =noinstall=, while its
+=loop/install.sh= was the laptop's installer. An agent moving between them typed the wrong one, and
+a build meant as a compile check could install. The exit code for "the phone's build has newer work"
+was 4 in sign_reader and 5 in bsfc_mapper, whose 4 was a session logging.
+
+On the user's word, one pair: =build.sh= builds, =install.sh= installs (sign_reader's shape), since
+a compile check that cannot install is the safer default, and the install's words (=nobuild=,
+=older=, =reinstall=) then belong to one script. bsfc_mapper's numbering for the codes, as the one
+with the most of them; the phone's variable stays each project's, renamed to one pattern. Dropped:
+=build.sh install= everywhere (bsfc_mapper's habit would have kept its default install), and both
+names for the same thing (two habits kept alive). android_imu and squiggle_snap gained the order
+check with it, sign_reader a =build.sh=, and bsfc_mapper's laptop installer the name
+=laptop_install.sh=; its =build.sh= still accepts =noinstall=.

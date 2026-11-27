@@ -34,6 +34,9 @@ sign_reader and squiggle_snap. So far:
 
 Where a pull lands, the same rule for every project: =docs/data-dirs.org=, with its plan.
 
+What a project's =loop/= scripts are called, the words they take and their exit codes, the same in
+every project (=build.sh= builds, =install.sh= installs, =pull.sh= pulls): =docs/loop-scripts.org=.
+
 A plan, not built: the app's finished logs in git-annex, with the phone as an =adb= special remote
 and two copies off the phone before a log leaves it (=docs/annex.org=).
 
